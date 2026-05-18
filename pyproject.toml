@@ -1,0 +1,26 @@
+[project]
+name = "pub-reader"
+version = "0.1.0"
+description = "Desktop reader that translates English academic PDFs into Chinese Markdown and generates Chinese reading summaries."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.7",
+    "PyMuPDF>=1.24",
+    "httpx>=0.27",
+    "python-slugify>=8.0",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.9",
+]
+
+[project.scripts]
+pub-reader = "pub_reader.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["pub_reader*"]
+
+[tool.pyinstaller]
+app_name = "Pub Reader"

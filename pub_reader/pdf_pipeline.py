@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import re
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+import fitz
+from slugify import slugify
+
+from pub_reader.llm import DeepSeekClient
+
+
+ProgressCallback = Callable[[str, int], None]
+
+
+@dataclass
+class PaperOutputs:
+    title: str
+    paper_dir: Path
+    original_pdf: Path
+    translated_md: Path
+    summary_md: Path
+
+
+def _clean_text(text: str) -> str:
+    text = text.replace("\x00", "")
+    text = re.sub(r"-\n(?=[a-z])", "", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _guess_title(doc: fitz.Document, pdf_path: Path) -> str:
+    meta_title = (doc.metadata or {}).get("title") or ""
+    if meta_title and len(meta_title.strip()) > 5:
+        return _clean_text(meta_title)[:120]
+
+    first_page = doc[0].get_text("text") if len(doc) else pdf_path.stem
+    lines = [line.strip() for line in first_page.splitlines() if line.strip()]
+    candidates = [line for line in lines[:12] if 8 <= len(line) <= 180]
+    return candidates[0] if candidates else pdf_path.stem
+
+
+def _start_page_index(doc: fitz.Document) -> int:
+    pattern = re.compile(r"\b(abstract|introduction)\b", re.IGNORECASE)
+    for index, page in enumerate(doc):
+        text = page.get_text("text")
+        if pattern.search(text):
+            return index
+    return 0
+
+
+def _chunk_text(text: str, max_chars: int = 5500) -> list[str]:
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    chunks: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if len(current) + len(paragraph) + 2 > max_chars and current:
+            chunks.append(current)
+            current = paragraph
+        else:
+            current = f"{current}\n\n{paragraph}".strip()
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, str, list[str]]:
+    doc = fitz.open(pdf_path)
+    assets_dir = output_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    start_page = _start_page_index(doc)
+    title = _guess_title(doc, pdf_path)
+    markdown_parts = [f"# {title}", ""]
+    plain_text_parts: list[str] = []
+    translatable_blocks: list[str] = []
+
+    for page_index in range(start_page, len(doc)):
+        page = doc[page_index]
+        markdown_parts.append(f"\n\n## Page {page_index + 1}\n")
+        page_text = _clean_text(page.get_text("text"))
+        if page_text:
+            plain_text_parts.append(page_text)
+            translatable_blocks.append(page_text)
+            markdown_parts.append(f"{{{{TRANSLATION_BLOCK_{len(translatable_blocks) - 1}}}}}")
+
+        for image_index, image in enumerate(page.get_images(full=True), start=1):
+            xref = image[0]
+            pix = fitz.Pixmap(doc, xref)
+            if pix.alpha:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            image_name = f"page-{page_index + 1:03d}-{image_index:02d}.png"
+            image_path = assets_dir / image_name
+            pix.save(image_path)
+            markdown_parts.append(f"\n![Page {page_index + 1} image {image_index}](assets/{image_name})\n")
+
+    return "\n".join(markdown_parts), "\n\n".join(plain_text_parts), translatable_blocks
+
+
+def process_pdf(
+    pdf_path: Path,
+    library_folder: Path,
+    api_key: str,
+    client: DeepSeekClient,
+    progress: ProgressCallback | None = None,
+) -> PaperOutputs:
+    def report(message: str, value: int) -> None:
+        if progress:
+            progress(message, value)
+
+    pdf_path = Path(pdf_path)
+    report("正在读取 PDF", 8)
+    with fitz.open(pdf_path) as doc:
+        title = _guess_title(doc, pdf_path)
+
+    paper_slug = slugify(title, max_length=80) or slugify(pdf_path.stem, max_length=80)
+    paper_dir = library_folder / paper_slug
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    original_pdf = paper_dir / "original.pdf"
+    shutil.copy2(pdf_path, original_pdf)
+
+    report("正在抽取正文、图片和图表文本", 18)
+    skeleton, plain_text, blocks = extract_markdown_skeleton(original_pdf, paper_dir)
+    sample = plain_text[:9000]
+
+    report("正在判断论文领域", 30)
+    field_context = client.detect_field(sample)
+
+    report("正在调用 DeepSeek 翻译正文", 42)
+    translated_blocks = client.translate_chunks(blocks, field_context)
+    translated_md = skeleton
+    for index, translated in enumerate(translated_blocks):
+        translated_md = translated_md.replace(f"{{{{TRANSLATION_BLOCK_{index}}}}}", translated)
+
+    translated_path = paper_dir / "translated.md"
+    translated_path.write_text(translated_md, encoding="utf-8")
+
+    report("正在生成中文 brief summary", 82)
+    summary = client.summarize(plain_text, field_context)
+    summary_path = paper_dir / "summary.md"
+    summary_path.write_text(summary, encoding="utf-8")
+
+    report("已完成", 100)
+    return PaperOutputs(
+        title=title,
+        paper_dir=paper_dir,
+        original_pdf=original_pdf,
+        translated_md=translated_path,
+        summary_md=summary_path,
+    )

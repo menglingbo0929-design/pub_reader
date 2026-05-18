@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+
+from slugify import slugify
+
+
+@dataclass
+class LibraryFolder:
+    name: str
+    path: Path
+
+
+@dataclass
+class PaperRecord:
+    name: str
+    path: Path
+    original_pdf: Path | None
+    translated_md: Path | None
+    summary_md: Path | None
+
+
+class LibraryManager:
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def list_folders(self) -> list[LibraryFolder]:
+        return [
+            LibraryFolder(path.name, path)
+            for path in sorted(self.root.iterdir())
+            if path.is_dir()
+        ]
+
+    def create_folder(self, name: str) -> LibraryFolder:
+        folder_name = slugify(name, allow_unicode=True) or "未命名文件夹"
+        path = self.root / folder_name
+        path.mkdir(parents=True, exist_ok=True)
+        return LibraryFolder(path.name, path)
+
+    def rename_folder(self, folder: LibraryFolder, new_name: str) -> LibraryFolder:
+        folder_name = slugify(new_name, allow_unicode=True) or folder.name
+        target = self.root / folder_name
+        folder.path.rename(target)
+        return LibraryFolder(target.name, target)
+
+    def delete_folder(self, folder: LibraryFolder) -> None:
+        shutil.rmtree(folder.path)
+
+    def list_papers(self, folder: LibraryFolder) -> list[PaperRecord]:
+        papers: list[PaperRecord] = []
+        for path in sorted(folder.path.iterdir()):
+            if not path.is_dir():
+                continue
+            papers.append(
+                PaperRecord(
+                    name=path.name,
+                    path=path,
+                    original_pdf=path / "original.pdf" if (path / "original.pdf").exists() else None,
+                    translated_md=path / "translated.md" if (path / "translated.md").exists() else None,
+                    summary_md=path / "summary.md" if (path / "summary.md").exists() else None,
+                )
+            )
+        return papers
