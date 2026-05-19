@@ -12,3 +12,4 @@
 - Updated the setup script so the desktop shortcut installation keeps `library_dir` pointed at the cloned project's `output/` folder.
 - Added explanatory comments across configuration, library management, PDF extraction, LLM calls, and the UI worker flow.
 - Reworked PDF extraction to preserve layout by cropping raster figures, vector figures, detected tables, and equation-like blocks as PNG assets, while translating only normal text blocks in reading order.
+- Made the PowerShell setup script ASCII-safe so desktop shortcut creation works reliably in Windows PowerShell.

@@ -1,9 +1,8 @@
 $ErrorActionPreference = "Stop"
 
-$Source = Join-Path $PSScriptRoot "..\dist\PubReader"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$Source = Join-Path $ProjectRoot "dist\PubReader"
 $OutputDir = Join-Path $ProjectRoot "output"
-$DefaultFolder = Join-Path $OutputDir "默认文件夹"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\PubReader"
 $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Pub Reader.lnk"
 $ExePath = Join-Path $InstallDir "PubReader.exe"
@@ -20,7 +19,7 @@ if (Test-Path $InstallDir) {
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Recurse -Force -Path (Join-Path $Source "*") -Destination $InstallDir
-New-Item -ItemType Directory -Force -Path $DefaultFolder | Out-Null
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 
 $Config = [ordered]@{
