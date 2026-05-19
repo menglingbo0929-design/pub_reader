@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Callable
 
 import fitz
-from slugify import slugify
 
 from pub_reader.llm import DeepSeekClient
 
@@ -67,6 +66,24 @@ def _chunk_text(text: str, max_chars: int = 5500) -> list[str]:
     return chunks
 
 
+def _safe_folder_name(name: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .")
+    return cleaned or "untitled-paper"
+
+
+def _unique_dir(base_dir: Path, folder_name: str) -> Path:
+    candidate = base_dir / folder_name
+    if not candidate.exists():
+        return candidate
+
+    index = 2
+    while True:
+        candidate = base_dir / f"{folder_name}-{index}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
 def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, str, list[str]]:
     doc = fitz.open(pdf_path)
     assets_dir = output_dir / "assets"
@@ -77,6 +94,8 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
     plain_text_parts: list[str] = []
     translatable_blocks: list[str] = []
 
+    # Build a Markdown template in reading order, then replace text placeholders
+    # with translated chunks after all model calls finish.
     for page_index in range(start_page, len(doc)):
         page = doc[page_index]
         markdown_parts.append(f"\n\n## Page {page_index + 1}\n")
@@ -115,10 +134,9 @@ def process_pdf(
     with fitz.open(pdf_path) as doc:
         title = _guess_title(doc, pdf_path)
 
-    paper_slug = slugify(title, max_length=80) or slugify(pdf_path.stem, max_length=80)
-    paper_dir = library_folder / paper_slug
+    paper_dir = _unique_dir(library_folder, _safe_folder_name(pdf_path.stem))
     paper_dir.mkdir(parents=True, exist_ok=True)
-    original_pdf = paper_dir / "original.pdf"
+    original_pdf = paper_dir / pdf_path.name
     shutil.copy2(pdf_path, original_pdf)
 
     report("正在抽取正文、图片和图表文本", 18)
@@ -129,7 +147,14 @@ def process_pdf(
     field_context = client.detect_field(sample)
 
     report("正在调用 DeepSeek 翻译正文", 42)
-    translated_blocks = client.translate_chunks(blocks, field_context)
+    translated_blocks = client.translate_chunks(
+        blocks,
+        field_context,
+        progress=lambda done, total: report(
+            f"正在调用 DeepSeek 翻译正文（{done}/{total}）",
+            42 + int((done / max(total, 1)) * 34),
+        ),
+    )
     translated_md = skeleton
     for index, translated in enumerate(translated_blocks):
         translated_md = translated_md.replace(f"{{{{TRANSLATION_BLOCK_{index}}}}}", translated)

@@ -54,11 +54,12 @@ class LibraryManager:
         for path in sorted(folder.path.iterdir()):
             if not path.is_dir():
                 continue
+            pdfs = sorted(path.glob("*.pdf"))
             papers.append(
                 PaperRecord(
                     name=path.name,
                     path=path,
-                    original_pdf=path / "original.pdf" if (path / "original.pdf").exists() else None,
+                    original_pdf=pdfs[0] if pdfs else None,
                     translated_md=path / "translated.md" if (path / "translated.md").exists() else None,
                     summary_md=path / "summary.md" if (path / "summary.md").exists() else None,
                 )

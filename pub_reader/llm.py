@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 import httpx
 
@@ -42,6 +42,7 @@ class DeepSeekClient:
             raise DeepSeekError("DeepSeek API key 不能为空。")
 
     def complete(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+        # DeepSeek uses an OpenAI-compatible chat completion payload.
         payload = {
             "model": self.config.model_name,
             "messages": messages,
@@ -79,12 +80,21 @@ class DeepSeekClient:
         except json.JSONDecodeError:
             return FieldContext(field="未知领域", subfield="未知子领域", terminology_notes=raw[:1000])
 
-    def translate_chunks(self, chunks: Iterable[str], field_context: FieldContext) -> list[str]:
+    def translate_chunks(
+        self,
+        chunks: Iterable[str],
+        field_context: FieldContext,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> list[str]:
+        chunk_list = list(chunks)
         translated: list[str] = []
         field_text = field_context.to_prompt_text()
-        for chunk in chunks:
+        total = len(chunk_list)
+        for index, chunk in enumerate(chunk_list, start=1):
             if not chunk.strip():
                 translated.append("")
+                if progress:
+                    progress(index, total)
                 continue
             translated.append(
                 self.complete(
@@ -101,6 +111,8 @@ class DeepSeekClient:
                     temperature=0.15,
                 )
             )
+            if progress:
+                progress(index, total)
         return translated
 
     def summarize(self, paper_text: str, field_context: FieldContext) -> str:
