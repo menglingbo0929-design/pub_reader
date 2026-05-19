@@ -14,6 +14,8 @@ OLD_LIBRARY_DIR = APP_DIR / "library"
 def project_root() -> Path:
     """Return the cloned project root when the app runs from source or dist."""
     if getattr(sys, "frozen", False):
+        # Installed builds live under dist/PubReader or LocalAppData. Walk upward
+        # so a setup-created config can still point back to the cloned project.
         exe_dir = Path(sys.executable).resolve().parent
         for candidate in [exe_dir, *exe_dir.parents]:
             if (candidate / "pyproject.toml").exists():
@@ -35,6 +37,8 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
+    # Keep config metadata in the user profile, but keep paper outputs beside
+    # the cloned project so users can find and version their reading results.
     APP_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_FOLDER_DIR.mkdir(parents=True, exist_ok=True)

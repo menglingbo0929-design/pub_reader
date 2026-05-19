@@ -24,6 +24,7 @@ class PaperOutputs:
 
 
 def _clean_text(text: str) -> str:
+    # Normalize common PDF extraction artifacts before sending text to the LLM.
     text = text.replace("\x00", "")
     text = re.sub(r"-\n(?=[a-z])", "", text)
     text = re.sub(r"[ \t]+\n", "\n", text)
@@ -32,6 +33,7 @@ def _clean_text(text: str) -> str:
 
 
 def _guess_title(doc: fitz.Document, pdf_path: Path) -> str:
+    # Prefer embedded metadata, then fall back to the first readable line.
     meta_title = (doc.metadata or {}).get("title") or ""
     if meta_title and len(meta_title.strip()) > 5:
         return _clean_text(meta_title)[:120]
@@ -43,6 +45,7 @@ def _guess_title(doc: fitz.Document, pdf_path: Path) -> str:
 
 
 def _start_page_index(doc: fitz.Document) -> int:
+    # Skip front matter where possible and begin from Abstract/Introduction.
     pattern = re.compile(r"\b(abstract|introduction)\b", re.IGNORECASE)
     for index, page in enumerate(doc):
         text = page.get_text("text")
@@ -52,6 +55,7 @@ def _start_page_index(doc: fitz.Document) -> int:
 
 
 def _chunk_text(text: str, max_chars: int = 5500) -> list[str]:
+    # Split by paragraphs first so model calls do not cut sentences mid-flow.
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks: list[str] = []
     current = ""
@@ -67,11 +71,14 @@ def _chunk_text(text: str, max_chars: int = 5500) -> list[str]:
 
 
 def _safe_folder_name(name: str) -> str:
+    # Windows disallows several filename characters; preserve everything else,
+    # including case, so a PDF like GAD.pdf creates output/GAD/.
     cleaned = re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .")
     return cleaned or "untitled-paper"
 
 
 def _unique_dir(base_dir: Path, folder_name: str) -> Path:
+    # Avoid overwriting an earlier run for the same PDF name.
     candidate = base_dir / folder_name
     if not candidate.exists():
         return candidate
@@ -147,6 +154,8 @@ def process_pdf(
     field_context = client.detect_field(sample)
 
     report("正在调用 DeepSeek 翻译正文", 42)
+    # Translation is the longest stage. Progress is mapped to 42%-76% and the
+    # summary stage starts after that, so the progress bar keeps moving.
     translated_blocks = client.translate_chunks(
         blocks,
         field_context,

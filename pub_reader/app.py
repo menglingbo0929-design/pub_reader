@@ -90,6 +90,8 @@ class ProcessPdfTask(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
+            # Run all PDF and network work off the UI thread so the window stays
+            # responsive while DeepSeek requests are in flight.
             config = load_config()
             client = DeepSeekClient(self.api_key, config)
             outputs = process_pdf(
@@ -325,6 +327,7 @@ class MainWindow(QMainWindow):
         self.folder_list.clear()
         folders = self.library.list_folders()
         if not folders:
+            # The output folder should always have a starter collection.
             self.library.create_folder("默认文件夹")
             folders = self.library.list_folders()
         for folder in folders:
@@ -403,6 +406,7 @@ class MainWindow(QMainWindow):
         self.generate_button.setEnabled(False)
         self.upload_button.setEnabled(False)
         self.progress.setValue(0)
+        # The worker emits progress/status signals back to Qt's main thread.
         task = ProcessPdfTask(self.current_pdf, self.current_folder, dialog.api_key)
         task.signals.progress.connect(self.on_progress)
         task.signals.finished.connect(self.on_finished)

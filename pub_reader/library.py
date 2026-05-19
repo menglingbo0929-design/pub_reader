@@ -28,6 +28,7 @@ class LibraryManager:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def list_folders(self) -> list[LibraryFolder]:
+        # Top-level folders are user-created reading collections under output/.
         return [
             LibraryFolder(path.name, path)
             for path in sorted(self.root.iterdir())
@@ -35,6 +36,7 @@ class LibraryManager:
         ]
 
     def create_folder(self, name: str) -> LibraryFolder:
+        # Preserve Chinese names while removing path separators and unsafe chars.
         folder_name = slugify(name, allow_unicode=True) or "未命名文件夹"
         path = self.root / folder_name
         path.mkdir(parents=True, exist_ok=True)
@@ -54,6 +56,8 @@ class LibraryManager:
         for path in sorted(folder.path.iterdir()):
             if not path.is_dir():
                 continue
+            # Each paper folder keeps the original PDF name rather than forcing
+            # "original.pdf", so the file remains recognizable outside the app.
             pdfs = sorted(path.glob("*.pdf"))
             papers.append(
                 PaperRecord(

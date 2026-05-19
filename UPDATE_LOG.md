@@ -10,3 +10,4 @@
 - Added translation chunk progress updates so long DeepSeek calls do not appear frozen at 42%.
 - Added small code comments around project-root detection, Markdown skeleton replacement, and DeepSeek request payloads.
 - Updated the setup script so the desktop shortcut installation keeps `library_dir` pointed at the cloned project's `output/` folder.
+- Added explanatory comments across configuration, library management, PDF extraction, LLM calls, and the UI worker flow.

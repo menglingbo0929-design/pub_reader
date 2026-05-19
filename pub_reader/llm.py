@@ -66,6 +66,8 @@ class DeepSeekClient:
             raise DeepSeekError(f"DeepSeek 响应格式无法解析：{data}") from exc
 
     def detect_field(self, sample_text: str) -> FieldContext:
+        # Field detection happens once from Abstract/Introduction-like text and
+        # is reused by all later translation/summary prompts for terminology.
         raw = self.complete(
             [{"role": "user", "content": FIELD_PROMPT.format(text=sample_text[:8000])}],
             temperature=0,
@@ -91,6 +93,8 @@ class DeepSeekClient:
         field_text = field_context.to_prompt_text()
         total = len(chunk_list)
         for index, chunk in enumerate(chunk_list, start=1):
+            # Progress is reported per chunk because a long paper can require
+            # many sequential model calls and otherwise looks frozen in the UI.
             if not chunk.strip():
                 translated.append("")
                 if progress:
@@ -116,6 +120,8 @@ class DeepSeekClient:
         return translated
 
     def summarize(self, paper_text: str, field_context: FieldContext) -> str:
+        # Summary uses a capped amount of extracted text to avoid oversized API
+        # requests while still covering the main paper structure.
         return self.complete(
             [
                 {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
