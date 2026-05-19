@@ -47,7 +47,7 @@ def load_config() -> AppConfig:
         save_config(config)
         return config
 
-    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     config = AppConfig(**{**asdict(AppConfig()), **data})
 
     # Older builds stored papers under ~/.pub_reader/library. Move the default

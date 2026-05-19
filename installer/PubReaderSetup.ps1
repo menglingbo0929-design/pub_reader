@@ -27,7 +27,9 @@ $Config = [ordered]@{
     model_name = "deepseek-v4-pro"
     library_dir = $OutputDir
 }
-$Config | ConvertTo-Json -Depth 3 | Set-Content -Encoding UTF8 -Path $ConfigPath
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$ConfigJson = $Config | ConvertTo-Json -Depth 3
+[System.IO.File]::WriteAllText($ConfigPath, $ConfigJson, $Utf8NoBom)
 
 $Shell = New-Object -ComObject WScript.Shell
 $Shortcut = $Shell.CreateShortcut($DesktopShortcut)
