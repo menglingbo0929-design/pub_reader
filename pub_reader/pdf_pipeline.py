@@ -20,8 +20,8 @@ class PaperOutputs:
     title: str
     paper_dir: Path
     original_pdf: Path
-    translated_md: Path
-    summary_md: Path
+    translated_md: Path | None = None
+    summary_md: Path | None = None
 
 
 @dataclass
@@ -95,6 +95,46 @@ def _unique_dir(base_dir: Path, folder_name: str) -> Path:
         if not candidate.exists():
             return candidate
         index += 1
+
+
+def _paper_dir_for_pdf(library_folder: Path, pdf_path: Path) -> Path:
+    # A paper should have one stable workspace. Splitting translation and
+    # summary only works if both actions write to the same PDF-named folder.
+    return Path(library_folder) / _safe_folder_name(Path(pdf_path).stem)
+
+
+def _prepare_paper_workspace(
+    pdf_path: Path,
+    library_folder: Path,
+    progress: ProgressCallback | None = None,
+) -> tuple[str, Path, Path]:
+    def report(message: str, value: int) -> None:
+        if progress:
+            progress(message, value)
+
+    pdf_path = Path(pdf_path)
+    report("正在读取 PDF", 8)
+    with fitz.open(pdf_path) as doc:
+        title = _guess_title(doc, pdf_path)
+
+    paper_dir = _paper_dir_for_pdf(library_folder, pdf_path)
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    original_pdf = paper_dir / pdf_path.name
+
+    # When the user selects a PDF that is already inside the paper folder,
+    # avoid copying the file onto itself.
+    if pdf_path.resolve() != original_pdf.resolve():
+        shutil.copy2(pdf_path, original_pdf)
+
+    return title, paper_dir, original_pdf
+
+
+def _extract_plain_text(pdf_path: Path) -> tuple[str, str]:
+    with fitz.open(pdf_path) as doc:
+        title = _guess_title(doc, pdf_path)
+        start_page = _start_page_index(doc)
+        parts = [_clean_text(doc[index].get_text("text")) for index in range(start_page, len(doc))]
+    return title, "\n\n".join(part for part in parts if part)
 
 
 def _block_text(block: dict) -> str:
@@ -421,6 +461,91 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
     return "\n".join(markdown_parts), "\n\n".join(plain_text_parts), translatable_blocks
 
 
+def generate_translation(
+    pdf_path: Path,
+    library_folder: Path,
+    api_key: str,
+    client: DeepSeekClient,
+    progress: ProgressCallback | None = None,
+) -> PaperOutputs:
+    def report(message: str, value: int) -> None:
+        if progress:
+            progress(message, value)
+
+    _ = api_key
+    title, paper_dir, original_pdf = _prepare_paper_workspace(pdf_path, library_folder, progress)
+
+    report("正在按图表标题截取整块图表并抽取正文", 18)
+    skeleton, plain_text, blocks = extract_markdown_skeleton(original_pdf, paper_dir)
+    sample = plain_text[:9000]
+
+    report("正在判断论文领域", 30)
+    field_context = client.detect_field(sample)
+
+    report("正在调用 DeepSeek 翻译正文", 42)
+    # Translation is the longest stage, so report every chunk to keep the UI
+    # from looking frozen during a long paper.
+    translated_blocks = client.translate_chunks(
+        blocks,
+        field_context,
+        progress=lambda done, total: report(
+            f"正在调用 DeepSeek 翻译正文（{done}/{total}）",
+            42 + int((done / max(total, 1)) * 52),
+        ),
+    )
+    translated_md = skeleton
+    for index, translated in enumerate(translated_blocks):
+        translated_md = translated_md.replace(f"{{{{TRANSLATION_BLOCK_{index}}}}}", translated)
+
+    translated_path = paper_dir / "translated.md"
+    translated_path.write_text(translated_md, encoding="utf-8")
+
+    report("译文已完成", 100)
+    return PaperOutputs(
+        title=title,
+        paper_dir=paper_dir,
+        original_pdf=original_pdf,
+        translated_md=translated_path,
+        summary_md=None,
+    )
+
+
+def generate_summary(
+    pdf_path: Path,
+    library_folder: Path,
+    api_key: str,
+    client: DeepSeekClient,
+    progress: ProgressCallback | None = None,
+) -> PaperOutputs:
+    def report(message: str, value: int) -> None:
+        if progress:
+            progress(message, value)
+
+    _ = api_key
+    title, paper_dir, original_pdf = _prepare_paper_workspace(pdf_path, library_folder, progress)
+
+    report("正在抽取正文用于 Summary", 20)
+    title, plain_text = _extract_plain_text(original_pdf)
+    sample = plain_text[:9000]
+
+    report("正在判断论文领域", 38)
+    field_context = client.detect_field(sample)
+
+    report("正在调用 DeepSeek 生成中文 brief summary", 58)
+    summary = client.summarize(plain_text, field_context)
+    summary_path = paper_dir / "summary.md"
+    summary_path.write_text(summary, encoding="utf-8")
+
+    report("Summary 已完成", 100)
+    return PaperOutputs(
+        title=title,
+        paper_dir=paper_dir,
+        original_pdf=original_pdf,
+        translated_md=None,
+        summary_md=summary_path,
+    )
+
+
 def process_pdf(
     pdf_path: Path,
     library_folder: Path,
@@ -437,10 +562,11 @@ def process_pdf(
     with fitz.open(pdf_path) as doc:
         title = _guess_title(doc, pdf_path)
 
-    paper_dir = _unique_dir(library_folder, _safe_folder_name(pdf_path.stem))
+    paper_dir = _paper_dir_for_pdf(library_folder, pdf_path)
     paper_dir.mkdir(parents=True, exist_ok=True)
     original_pdf = paper_dir / pdf_path.name
-    shutil.copy2(pdf_path, original_pdf)
+    if pdf_path.resolve() != original_pdf.resolve():
+        shutil.copy2(pdf_path, original_pdf)
 
     report("正在按图表标题截取整块图表并抽取正文", 18)
     skeleton, plain_text, blocks = extract_markdown_skeleton(original_pdf, paper_dir)

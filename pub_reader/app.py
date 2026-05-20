@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSplitter,
     QStatusBar,
+    QStyle,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -32,7 +33,7 @@ from PySide6.QtCore import QUrl
 from pub_reader.config import load_config
 from pub_reader.library import LibraryFolder, LibraryManager, PaperRecord
 from pub_reader.llm import DeepSeekClient, DeepSeekError
-from pub_reader.pdf_pipeline import PaperOutputs, process_pdf
+from pub_reader.pdf_pipeline import PaperOutputs, generate_summary, generate_translation
 
 
 class ApiKeyDialog(QDialog):
@@ -80,11 +81,12 @@ class WorkerSignals(QObject):
 
 
 class ProcessPdfTask(QRunnable):
-    def __init__(self, pdf_path: Path, folder: LibraryFolder, api_key: str) -> None:
+    def __init__(self, pdf_path: Path, folder: LibraryFolder, api_key: str, action: str) -> None:
         super().__init__()
         self.pdf_path = pdf_path
         self.folder = folder
         self.api_key = api_key
+        self.action = action
         self.signals = WorkerSignals()
 
     @Slot()
@@ -94,7 +96,8 @@ class ProcessPdfTask(QRunnable):
             # responsive while DeepSeek requests are in flight.
             config = load_config()
             client = DeepSeekClient(self.api_key, config)
-            outputs = process_pdf(
+            runner = generate_translation if self.action == "translation" else generate_summary
+            outputs = runner(
                 self.pdf_path,
                 self.folder.path,
                 self.api_key,
@@ -179,16 +182,24 @@ class MainWindow(QMainWindow):
         heading_box.addWidget(self.folder_label)
 
         self.upload_button = QPushButton("选择 PDF")
+        self.upload_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
         self.upload_button.setMinimumHeight(44)
         self.upload_button.clicked.connect(self.choose_pdf)
-        self.generate_button = QPushButton("生成译文与 Summary")
-        self.generate_button.setObjectName("PrimaryButton")
-        self.generate_button.setMinimumHeight(44)
-        self.generate_button.clicked.connect(self.generate_outputs)
+        self.translate_button = QPushButton("生成译文")
+        self.translate_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.translate_button.setObjectName("PrimaryButton")
+        self.translate_button.setMinimumHeight(44)
+        self.translate_button.clicked.connect(lambda: self.generate_outputs("translation"))
+        self.summary_button = QPushButton("生成 Summary")
+        self.summary_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogInfoView))
+        self.summary_button.setObjectName("SecondaryActionButton")
+        self.summary_button.setMinimumHeight(44)
+        self.summary_button.clicked.connect(lambda: self.generate_outputs("summary"))
 
         header.addLayout(heading_box, 1)
         header.addWidget(self.upload_button)
-        header.addWidget(self.generate_button)
+        header.addWidget(self.translate_button)
+        header.addWidget(self.summary_button)
 
         self.selected_pdf_label = QLabel("尚未选择 PDF")
         self.selected_pdf_label.setObjectName("SelectedFile")
@@ -303,6 +314,14 @@ class MainWindow(QMainWindow):
             QPushButton#PrimaryButton:hover {
                 background: #0F766E;
             }
+            QPushButton#SecondaryActionButton {
+                background: #155E75;
+                color: #FFFFFF;
+                border: 1px solid #155E75;
+            }
+            QPushButton#SecondaryActionButton:hover {
+                background: #164E63;
+            }
             QLineEdit {
                 border: 1px solid #99F6E4;
                 border-radius: 8px;
@@ -388,7 +407,12 @@ class MainWindow(QMainWindow):
             self.current_pdf = Path(path)
             self.selected_pdf_label.setText(str(self.current_pdf))
 
-    def generate_outputs(self) -> None:
+    def _set_processing_enabled(self, enabled: bool) -> None:
+        self.upload_button.setEnabled(enabled)
+        self.translate_button.setEnabled(enabled)
+        self.summary_button.setEnabled(enabled)
+
+    def generate_outputs(self, action: str) -> None:
         if not self.current_folder:
             QMessageBox.warning(self, "需要文件夹", "请先选择或新建一个文件夹。")
             return
@@ -403,11 +427,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "API key 为空", "请输入 DeepSeek API key。")
             return
 
-        self.generate_button.setEnabled(False)
-        self.upload_button.setEnabled(False)
+        self._set_processing_enabled(False)
         self.progress.setValue(0)
         # The worker emits progress/status signals back to Qt's main thread.
-        task = ProcessPdfTask(self.current_pdf, self.current_folder, dialog.api_key)
+        task = ProcessPdfTask(self.current_pdf, self.current_folder, dialog.api_key, action)
         task.signals.progress.connect(self.on_progress)
         task.signals.finished.connect(self.on_finished)
         task.signals.failed.connect(self.on_failed)
@@ -418,15 +441,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def on_finished(self, outputs: PaperOutputs) -> None:
-        self.generate_button.setEnabled(True)
-        self.upload_button.setEnabled(True)
+        self._set_processing_enabled(True)
         self.statusBar().showMessage("生成完成")
         self.refresh_papers()
-        QMessageBox.information(self, "生成完成", f"已生成：\n{outputs.translated_md}\n{outputs.summary_md}")
+        generated = [path for path in [outputs.translated_md, outputs.summary_md] if path is not None]
+        QMessageBox.information(self, "生成完成", "已生成：\n" + "\n".join(str(path) for path in generated))
 
     def on_failed(self, message: str) -> None:
-        self.generate_button.setEnabled(True)
-        self.upload_button.setEnabled(True)
+        self._set_processing_enabled(True)
         self.statusBar().showMessage("生成失败")
         QMessageBox.critical(self, "生成失败", message)
 
