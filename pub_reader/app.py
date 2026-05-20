@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -15,8 +17,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QStyle,
     QToolBar,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +36,9 @@ from pub_reader.config import load_config
 from pub_reader.library import LibraryFolder, LibraryManager, PaperRecord
 from pub_reader.llm import DeepSeekClient, DeepSeekError
 from pub_reader.pdf_pipeline import PaperOutputs, generate_summary, generate_translation
+
+
+INVALID_NAME_RE = re.compile(r'[<>:"/\\|?*]+')
 
 
 class ApiKeyDialog(QDialog):
@@ -117,6 +122,7 @@ class MainWindow(QMainWindow):
         self.thread_pool = QThreadPool.globalInstance()
         self.current_folder: LibraryFolder | None = None
         self.current_pdf: Path | None = None
+        self.selected_tree_item: QTreeWidgetItem | None = None
 
         self.setWindowTitle("Pub Reader")
         self.setMinimumSize(1120, 720)
@@ -146,8 +152,11 @@ class MainWindow(QMainWindow):
         app_title.setObjectName("AppTitle")
         subtitle = QLabel("英文论文中文阅读工作台")
         subtitle.setObjectName("Subtitle")
-        self.folder_list = QListWidget()
-        self.folder_list.currentItemChanged.connect(self.on_folder_changed)
+        self.library_tree = QTreeWidget()
+        self.library_tree.setHeaderHidden(True)
+        self.library_tree.setIndentation(18)
+        self.library_tree.currentItemChanged.connect(self.on_tree_selection_changed)
+        self.library_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
 
         folder_buttons = QHBoxLayout()
         new_folder = QPushButton("新建")
@@ -163,7 +172,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(app_title)
         sidebar_layout.addWidget(subtitle)
         sidebar_layout.addWidget(QLabel("文件夹"))
-        sidebar_layout.addWidget(self.folder_list, 1)
+        sidebar_layout.addWidget(self.library_tree, 1)
         sidebar_layout.addLayout(folder_buttons)
 
         content = QFrame()
@@ -209,22 +218,16 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
 
-        paper_area = QSplitter(Qt.Horizontal)
-        self.paper_list = QListWidget()
-        self.paper_list.currentItemChanged.connect(self.on_paper_changed)
         self.detail = QLabel("导入论文后，这里会显示原文 PDF、中文译文和 Summary 的入口。")
         self.detail.setObjectName("DetailPanel")
         self.detail.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.detail.setWordWrap(True)
         self.detail.setOpenExternalLinks(True)
-        paper_area.addWidget(self.paper_list)
-        paper_area.addWidget(self.detail)
-        paper_area.setSizes([360, 620])
 
         content_layout.addLayout(header)
         content_layout.addWidget(self.selected_pdf_label)
         content_layout.addWidget(self.progress)
-        content_layout.addWidget(paper_area, 1)
+        content_layout.addWidget(self.detail, 1)
 
         splitter.addWidget(sidebar)
         splitter.addWidget(content)
@@ -272,18 +275,18 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
                 line-height: 1.6;
             }
-            QListWidget {
+            QTreeWidget {
                 background: #FFFFFF;
                 border: 1px solid #CFEDEA;
                 border-radius: 8px;
                 padding: 6px;
             }
-            QListWidget::item {
+            QTreeWidget::item {
                 min-height: 36px;
                 padding: 8px;
                 border-radius: 6px;
             }
-            QListWidget::item:selected {
+            QTreeWidget::item:selected {
                 background: #CCFBF1;
                 color: #134E4A;
             }
@@ -343,35 +346,103 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_folders(self) -> None:
-        self.folder_list.clear()
+        self.library_tree.clear()
         folders = self.library.list_folders()
         if not folders:
             # The output folder should always have a starter collection.
             self.library.create_folder("默认文件夹")
             folders = self.library.list_folders()
         for folder in folders:
-            item = QListWidgetItem(folder.name)
-            item.setData(Qt.UserRole, folder)
-            self.folder_list.addItem(item)
-        if self.folder_list.count():
-            self.folder_list.setCurrentRow(0)
+            folder_item = QTreeWidgetItem([folder.name])
+            folder_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+            folder_item.setData(0, Qt.UserRole, {"kind": "collection", "folder": folder, "path": folder.path})
+            self.library_tree.addTopLevelItem(folder_item)
+            folder_item.setExpanded(True)
+            for paper in self.library.list_papers(folder):
+                paper_item = QTreeWidgetItem([paper.name])
+                paper_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                paper_item.setData(
+                    0,
+                    Qt.UserRole,
+                    {"kind": "paper", "folder": folder, "paper": paper, "path": paper.path},
+                )
+                folder_item.addChild(paper_item)
+                self._add_file_children(paper_item, paper.path, folder)
+        if self.library_tree.topLevelItemCount():
+            self.library_tree.setCurrentItem(self.library_tree.topLevelItem(0))
 
-    def on_folder_changed(self, current: QListWidgetItem | None) -> None:
+    def _add_file_children(self, parent_item: QTreeWidgetItem, path: Path, folder: LibraryFolder) -> None:
+        if not path.exists() or not path.is_dir():
+            return
+        children = sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            kind = "dir" if child.is_dir() else "file"
+            item = QTreeWidgetItem([child.name])
+            icon = QStyle.SP_DirIcon if child.is_dir() else QStyle.SP_FileIcon
+            item.setIcon(0, self.style().standardIcon(icon))
+            item.setData(0, Qt.UserRole, {"kind": kind, "folder": folder, "path": child})
+            parent_item.addChild(item)
+            if child.is_dir():
+                self._add_file_children(item, child, folder)
+
+    def _selected_data(self) -> dict:
+        item = self.library_tree.currentItem()
+        return item.data(0, Qt.UserRole) if item else {}
+
+    def _clean_name(self, name: str) -> str:
+        return INVALID_NAME_RE.sub("_", name).strip(" .")
+
+    def _is_inside_library(self, path: Path) -> bool:
+        try:
+            path.resolve().relative_to(self.library.root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    def on_tree_selection_changed(
+        self,
+        current: QTreeWidgetItem | None,
+        _previous: QTreeWidgetItem | None = None,
+    ) -> None:
         if current is None:
             return
-        self.current_folder = current.data(Qt.UserRole)
-        self.folder_label.setText(f"当前文件夹：{self.current_folder.name}")
-        self.refresh_papers()
+        self.selected_tree_item = current
+        data = current.data(0, Qt.UserRole) or {}
+        folder = data.get("folder")
+        if folder:
+            self.current_folder = folder
+            self.folder_label.setText(f"当前文件夹：{folder.name}")
 
-    def refresh_papers(self) -> None:
-        self.paper_list.clear()
-        self.detail.setText("选择一篇已处理论文查看文件入口。")
-        if not self.current_folder:
+        kind = data.get("kind")
+        if kind == "collection":
+            self.detail.setText(
+                f"<h2>{folder.name}</h2>"
+                f"<p>双击左侧文件夹可展开/收起论文列表。</p>"
+                f"<p>路径：{folder.path}</p>"
+            )
+        elif kind == "paper":
+            paper = data["paper"]
+            if paper.original_pdf:
+                self.current_pdf = paper.original_pdf
+                self.selected_pdf_label.setText(str(self.current_pdf))
+            self.show_paper_detail(paper)
+        elif kind in {"file", "dir"}:
+            path = Path(data["path"])
+            if path.suffix.lower() == ".pdf":
+                self.current_pdf = path
+                self.selected_pdf_label.setText(str(self.current_pdf))
+            self.show_path_detail(path)
+
+    def on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
+        data = item.data(0, Qt.UserRole) or {}
+        path = data.get("path")
+        if item.childCount():
+            item.setExpanded(not item.isExpanded())
             return
-        for paper in self.library.list_papers(self.current_folder):
-            item = QListWidgetItem(paper.name)
-            item.setData(Qt.UserRole, paper)
-            self.paper_list.addItem(item)
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def create_folder(self) -> None:
         name, ok = QInputDialog.getText(self, "新建文件夹", "文件夹名称：")
@@ -380,26 +451,65 @@ class MainWindow(QMainWindow):
             self.refresh_folders()
 
     def rename_folder(self) -> None:
-        if not self.current_folder:
+        data = self._selected_data()
+        if not data:
             return
-        name, ok = QInputDialog.getText(self, "重命名文件夹", "新名称：", text=self.current_folder.name)
-        if ok and name.strip():
-            self.library.rename_folder(self.current_folder, name.strip())
+        old_path = Path(data["path"])
+        name, ok = QInputDialog.getText(self, "重命名", "新名称：", text=old_path.name)
+        if not ok or not name.strip():
+            return
+        new_name = self._clean_name(name.strip())
+        if not new_name:
+            QMessageBox.warning(self, "名称无效", "请输入一个有效名称。")
+            return
+        try:
+            if data.get("kind") == "collection":
+                self.library.rename_folder(data["folder"], new_name)
+            else:
+                if not self._is_inside_library(old_path):
+                    QMessageBox.warning(self, "不能重命名", "只能重命名 output 目录内的文件或文件夹。")
+                    return
+                target = old_path.with_name(new_name)
+                if target.exists():
+                    QMessageBox.warning(self, "名称已存在", f"{target} 已存在。")
+                    return
+                old_path.rename(target)
             self.refresh_folders()
+        except OSError as exc:
+            QMessageBox.critical(self, "重命名失败", str(exc))
 
     def delete_folder(self) -> None:
-        if not self.current_folder:
+        data = self._selected_data()
+        if not data:
             return
+        path = Path(data["path"])
+        kind = data.get("kind")
+        if not self._is_inside_library(path):
+            QMessageBox.warning(self, "不能删除", "只能删除 output 目录内的文件或文件夹。")
+            return
+        if kind == "collection":
+            message = f"确定删除“{path.name}”及其中所有论文吗？"
+        elif kind == "paper":
+            message = f"确定删除论文文件夹“{path.name}”吗？大文件夹里的其他论文不会受影响。"
+        else:
+            message = f"确定删除“{path.name}”吗？"
         reply = QMessageBox.question(
             self,
-            "删除文件夹",
-            f"确定删除“{self.current_folder.name}”及其中所有论文吗？",
+            "删除",
+            message,
             QMessageBox.Yes | QMessageBox.No,
         )
-        if reply == QMessageBox.Yes:
-            self.library.delete_folder(self.current_folder)
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
             self.current_folder = None
             self.refresh_folders()
+        except OSError as exc:
+            QMessageBox.critical(self, "删除失败", str(exc))
 
     def choose_pdf(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择英文论文 PDF", "", "PDF Files (*.pdf)")
@@ -442,20 +552,19 @@ class MainWindow(QMainWindow):
 
     def on_finished(self, outputs: PaperOutputs) -> None:
         self._set_processing_enabled(True)
+        self.progress.setValue(100)
         self.statusBar().showMessage("生成完成")
-        self.refresh_papers()
+        self.refresh_folders()
         generated = [path for path in [outputs.translated_md, outputs.summary_md] if path is not None]
         QMessageBox.information(self, "生成完成", "已生成：\n" + "\n".join(str(path) for path in generated))
 
     def on_failed(self, message: str) -> None:
         self._set_processing_enabled(True)
-        self.statusBar().showMessage("生成失败")
+        self.progress.setValue(0)
+        self.statusBar().showMessage("生成失败，进度已复位")
         QMessageBox.critical(self, "生成失败", message)
 
-    def on_paper_changed(self, current: QListWidgetItem | None) -> None:
-        if current is None:
-            return
-        paper: PaperRecord = current.data(Qt.UserRole)
+    def show_paper_detail(self, paper: PaperRecord) -> None:
         links = [f"<h2>{paper.name}</h2>"]
         for label, path in [
             ("英文论文 PDF", paper.original_pdf),
@@ -467,6 +576,15 @@ class MainWindow(QMainWindow):
                 links.append(f'<p><a href="{url}">{label}</a><br><span>{path}</span></p>')
         links.append(f"<p>文件夹：{paper.path}</p>")
         self.detail.setText("\n".join(links))
+
+    def show_path_detail(self, path: Path) -> None:
+        url = QUrl.fromLocalFile(str(path)).toString()
+        kind = "文件夹" if path.is_dir() else "文件"
+        self.detail.setText(
+            f"<h2>{path.name}</h2>"
+            f'<p><a href="{url}">打开{kind}</a><br><span>{path}</span></p>'
+            "<p>单击左侧节点可选中；双击文件会打开，双击文件夹会展开或收起。</p>"
+        )
 
 
 def main() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -52,12 +53,29 @@ class DeepSeekClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        try:
-            with httpx.Client(timeout=120) as client:
-                response = client.post(self.config.api_base_url, headers=headers, json=payload)
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise DeepSeekError(f"DeepSeek 请求失败：{exc}") from exc
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                timeout = httpx.Timeout(180, connect=30)
+                with httpx.Client(timeout=timeout) as client:
+                    response = client.post(self.config.api_base_url, headers=headers, json=payload)
+                    response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code < 500 and status_code not in {408, 409, 425, 429}:
+                    raise DeepSeekError(f"DeepSeek 请求失败：HTTP {status_code}，请检查 API key 或模型权限。") from exc
+                last_error = exc
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                last_error = exc
+
+            if attempt < 3:
+                time.sleep(1.5 * attempt)
+        else:
+            raise DeepSeekError(
+                "DeepSeek 请求失败：连接被远端关闭或网络超时。已自动重试 3 次，"
+                "请稍后重试，或检查网络/代理/API 服务状态。"
+            ) from last_error
 
         data = response.json()
         try:
