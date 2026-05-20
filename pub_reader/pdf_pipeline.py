@@ -12,6 +12,7 @@ from pub_reader.llm import DeepSeekClient
 
 
 ProgressCallback = Callable[[str, int], None]
+CAPTION_RE = re.compile(r"^(fig(?:ure)?\.?|table|algorithm)\s*\d+", re.IGNORECASE)
 
 
 @dataclass
@@ -24,10 +25,23 @@ class PaperOutputs:
 
 
 @dataclass
+class TextBlock:
+    bbox: fitz.Rect
+    text: str
+    caption_kind: str | None = None
+
+
+@dataclass
+class Primitive:
+    bbox: fitz.Rect
+    kind: str
+
+
+@dataclass
 class LayoutElement:
     kind: str
     bbox: fitz.Rect
-    markdown: str
+    markdown: str = ""
     text: str = ""
 
 
@@ -93,6 +107,30 @@ def _block_text(block: dict) -> str:
     return _clean_text("\n".join(lines))
 
 
+def _caption_kind(text: str) -> str | None:
+    match = CAPTION_RE.match(text.strip())
+    if not match:
+        return None
+    raw = match.group(1).lower()
+    if raw.startswith("fig"):
+        return "figure"
+    if raw.startswith("table"):
+        return "table"
+    return "algorithm"
+
+
+def _text_blocks(page: fitz.Page) -> list[TextBlock]:
+    blocks: list[TextBlock] = []
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        text = _block_text(block)
+        if not text:
+            continue
+        blocks.append(TextBlock(fitz.Rect(block["bbox"]), text, _caption_kind(text)))
+    return blocks
+
+
 def _overlap_ratio(a: fitz.Rect, b: fitz.Rect) -> float:
     intersection = a & b
     if intersection.is_empty or a.get_area() == 0:
@@ -100,159 +138,258 @@ def _overlap_ratio(a: fitz.Rect, b: fitz.Rect) -> float:
     return intersection.get_area() / a.get_area()
 
 
-def _looks_like_formula(text: str) -> bool:
-    compact = re.sub(r"\s+", "", text)
-    if len(compact) < 4 or len(compact) > 260:
-        return False
-    math_symbols = set("=+-*/∑∫√∞≈≠≤≥±×÷∂∇∈∀∃→←↔αβγδθλμσπφωΓΔΘΛΣΦΩ")
-    symbol_count = sum(1 for char in compact if char in math_symbols)
-    digit_count = sum(1 for char in compact if char.isdigit())
-    letter_count = sum(1 for char in compact if char.isalpha())
-    has_equation_marker = bool(re.search(r"\(\s?\d+\s?\)$", text.strip()))
-    return (
-        has_equation_marker
-        or symbol_count >= 3
-        or (symbol_count >= 1 and digit_count >= 2 and letter_count <= 40)
-    )
+def _x_overlap_ratio(a: fitz.Rect, b: fitz.Rect) -> float:
+    overlap = max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
+    return overlap / max(a.width, 1.0)
+
+
+def _expand_rect(rect: fitz.Rect, page: fitz.Page, margin: float = 4) -> fitz.Rect:
+    expanded = fitz.Rect(rect.x0 - margin, rect.y0 - margin, rect.x1 + margin, rect.y1 + margin)
+    return expanded & page.rect
 
 
 def _save_page_clip(page: fitz.Page, rect: fitz.Rect, assets_dir: Path, name: str) -> str:
     # Cropping the rendered page preserves the original visual appearance of
     # figures, equations, and tables instead of asking the model to recreate it.
-    rect = rect & page.rect
-    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=rect, alpha=False)
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=_expand_rect(rect, page), alpha=False)
     image_name = f"{name}.png"
     image_path = assets_dir / image_name
     pix.save(image_path)
     return f"assets/{image_name}"
 
 
-def _page_table_rects(page: fitz.Page) -> list[fitz.Rect]:
-    try:
-        finder = page.find_tables()
-    except Exception:
-        return []
-    return [fitz.Rect(table.bbox) for table in finder.tables if table.bbox]
+def _primitive_rects(page: fitz.Page, text_blocks: list[TextBlock]) -> list[Primitive]:
+    primitives: list[Primitive] = []
 
-
-def _merge_nearby_rects(rects: list[fitz.Rect], padding: float = 8) -> list[fitz.Rect]:
-    clusters: list[fitz.Rect] = []
-    for rect in rects:
-        inflated = fitz.Rect(rect)
-        inflated.x0 -= padding
-        inflated.y0 -= padding
-        inflated.x1 += padding
-        inflated.y1 += padding
-        for index, cluster in enumerate(clusters):
-            if not (inflated & cluster).is_empty:
-                clusters[index] = cluster | inflated
-                break
-        else:
-            clusters.append(inflated)
-
-    changed = True
-    while changed:
-        changed = False
-        merged: list[fitz.Rect] = []
-        for rect in clusters:
-            for index, cluster in enumerate(merged):
-                if not (rect & cluster).is_empty:
-                    merged[index] = cluster | rect
-                    changed = True
-                    break
-            else:
-                merged.append(rect)
-        clusters = merged
-    return clusters
-
-
-def _page_vector_figure_rects(page: fitz.Page, table_rects: list[fitz.Rect]) -> list[fitz.Rect]:
-    drawing_rects: list[fitz.Rect] = []
     for drawing in page.get_drawings():
         rect = fitz.Rect(drawing.get("rect", (0, 0, 0, 0)))
-        if rect.is_empty or any(_overlap_ratio(rect, table_rect) > 0.3 for table_rect in table_rects):
-            continue
-        if rect.width < 8 and rect.height < 8:
-            continue
-        drawing_rects.append(rect)
+        if rect.width >= 2 or rect.height >= 2:
+            if rect.width < 1:
+                rect.x0 -= 0.5
+                rect.x1 += 0.5
+            if rect.height < 1:
+                rect.y0 -= 0.5
+                rect.y1 += 0.5
+            rect &= page.rect
+            primitives.append(Primitive(rect, "drawing"))
 
-    figure_rects: list[fitz.Rect] = []
-    for rect in _merge_nearby_rects(drawing_rects):
-        rect = rect & page.rect
-        if rect.width >= 80 and rect.height >= 40 and rect.get_area() >= 3000:
-            figure_rects.append(rect)
-    return figure_rects
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") == 1:
+            rect = fitz.Rect(block.get("bbox", (0, 0, 0, 0))) & page.rect
+            if not rect.is_empty:
+                primitives.append(Primitive(rect, "image"))
+
+    # Plot labels and table cell values are often normal PDF text. Include text
+    # as cluster material, but never use captions as crop material.
+    for block in text_blocks:
+        if block.caption_kind is None:
+            primitives.append(Primitive(block.bbox, "text"))
+
+    return primitives
+
+
+def _looks_like_formula(text: str, bbox: fitz.Rect, page: fitz.Page) -> bool:
+    stripped = text.strip()
+    if not stripped or stripped.startswith("["):
+        return False
+    if len(stripped.split()) > 18:
+        return False
+    compact = re.sub(r"\s+", "", stripped)
+    if len(compact) < 4 or len(compact) > 220:
+        return False
+    math_symbols = set("=+-*/∑∫√∞≈≠≤≥±×÷∂∇∈∀∃→←↔αβγδθλμσπφωΓΔΘΛΣΦΩ")
+    symbol_count = sum(1 for char in compact if char in math_symbols)
+    has_equation_marker = bool(re.search(r"\(\s?\d+\s?\)$", stripped))
+    centered = bbox.x0 > page.rect.width * 0.12 and bbox.x1 < page.rect.width * 0.88
+    return centered and (has_equation_marker or ("=" in compact and symbol_count >= 2))
+
+
+def _caption_groups(captions: list[TextBlock]) -> list[list[TextBlock]]:
+    groups: list[list[TextBlock]] = []
+    used: set[int] = set()
+    for index, caption in enumerate(captions):
+        if index in used:
+            continue
+        group = [caption]
+        used.add(index)
+
+        # Side-by-side tables are usually a single visual comparison. Crop them
+        # together so the Markdown does not show a pile of row fragments.
+        if caption.caption_kind == "table":
+            for other_index, other in enumerate(captions):
+                if other_index in used or other.caption_kind != "table":
+                    continue
+                same_row = abs(other.bbox.y0 - caption.bbox.y0) <= 18
+                if same_row:
+                    group.append(other)
+                    used.add(other_index)
+
+        groups.append(group)
+    return groups
+
+
+def _nearest_visual_cluster(
+    page: fitz.Page,
+    caption_group: list[TextBlock],
+    primitives: list[Primitive],
+) -> tuple[fitz.Rect | None, str]:
+    group_bbox = caption_group[0].bbox
+    for caption in caption_group[1:]:
+        group_bbox |= caption.bbox
+
+    if len(caption_group) > 1:
+        x_window = fitz.Rect(group_bbox.x0 - 35, 0, group_bbox.x1 + 35, page.rect.height)
+    elif group_bbox.width > page.rect.width * 0.55:
+        x_window = fitz.Rect(page.rect.x0, 0, page.rect.x1, page.rect.height)
+    elif caption_group[0].caption_kind == "figure":
+        x_window = fitz.Rect(group_bbox.x0 - 25, 0, group_bbox.x1 + 25, page.rect.height)
+    else:
+        x_window = fitz.Rect(group_bbox.x0 - 45, 0, group_bbox.x1 + 45, page.rect.height)
+    x_window &= page.rect
+
+    def cluster_from(candidates: list[Primitive], direction: str) -> fitz.Rect | None:
+        non_text = [item for item in candidates if item.kind != "text"]
+        seed_pool = non_text or candidates
+        if not seed_pool:
+            return None
+
+        if direction == "above":
+            seed = max(seed_pool, key=lambda item: item.bbox.y1)
+        else:
+            seed = min(seed_pool, key=lambda item: item.bbox.y0)
+
+        if non_text:
+            if len(caption_group) > 1:
+                if direction == "above":
+                    band = [
+                        item
+                        for item in non_text
+                        if item.bbox.y1 >= seed.bbox.y1 - 120 and item.bbox.y0 <= seed.bbox.y1 + 12
+                    ]
+                else:
+                    band = [
+                        item
+                        for item in non_text
+                        if item.bbox.y0 <= seed.bbox.y0 + 120 and item.bbox.y1 >= seed.bbox.y0 - 12
+                    ]
+                cluster = fitz.Rect(seed.bbox)
+                for item in band:
+                    cluster |= item.bbox
+            else:
+                cluster = fitz.Rect(seed.bbox)
+                changed = True
+                while changed:
+                    changed = False
+                    for item in non_text:
+                        if _overlap_ratio(item.bbox, cluster) > 0.05:
+                            new_cluster = cluster | item.bbox
+                        elif direction == "above":
+                            gap = cluster.y0 - item.bbox.y1
+                            new_cluster = cluster | item.bbox if -8 <= gap <= 28 else None
+                        else:
+                            gap = item.bbox.y0 - cluster.y1
+                            new_cluster = cluster | item.bbox if -8 <= gap <= 28 else None
+                        if new_cluster is not None and new_cluster != cluster:
+                            cluster = new_cluster
+                            changed = True
+
+            text_window = _expand_rect(cluster, page, margin=26)
+            for item in candidates:
+                if item.kind == "text" and not (item.bbox & text_window).is_empty:
+                    cluster |= item.bbox
+            return cluster & page.rect
+
+        cluster = fitz.Rect(seed.bbox)
+        changed = True
+        while changed:
+            changed = False
+            for item in candidates:
+                if _overlap_ratio(item.bbox, cluster) > 0.05:
+                    new_cluster = cluster | item.bbox
+                elif direction == "above":
+                    gap = cluster.y0 - item.bbox.y1
+                    new_cluster = cluster | item.bbox if -8 <= gap <= 42 else None
+                else:
+                    gap = item.bbox.y0 - cluster.y1
+                    new_cluster = cluster | item.bbox if -8 <= gap <= 42 else None
+                if new_cluster is not None and new_cluster != cluster:
+                    cluster = new_cluster
+                    changed = True
+
+        return cluster & page.rect
+
+    above = [
+        primitive
+        for primitive in primitives
+        if primitive.bbox.y1 <= group_bbox.y0 - 2 and _x_overlap_ratio(primitive.bbox, x_window) > 0.15
+    ]
+    below = [
+        primitive
+        for primitive in primitives
+        if primitive.bbox.y0 >= group_bbox.y1 + 2 and _x_overlap_ratio(primitive.bbox, x_window) > 0.15
+    ]
+
+    above_cluster = cluster_from(above, "above")
+    if above_cluster is not None and group_bbox.y0 - above_cluster.y1 <= 80:
+        return above_cluster, "above"
+
+    below_cluster = cluster_from(below, "below")
+    if below_cluster is not None and below_cluster.y0 - group_bbox.y1 <= 80:
+        return below_cluster, "below"
+
+    return None, "above"
 
 
 def _layout_elements(page: fitz.Page, page_number: int, assets_dir: Path) -> list[LayoutElement]:
+    text_blocks = _text_blocks(page)
+    primitives = _primitive_rects(page, text_blocks)
+    captions = [block for block in text_blocks if block.caption_kind is not None]
     elements: list[LayoutElement] = []
-    table_rects = _page_table_rects(page)
-    vector_figure_rects = _page_vector_figure_rects(page, table_rects)
+    skip_text: set[int] = set()
 
-    for table_index, rect in enumerate(table_rects, start=1):
-        rel_path = _save_page_clip(page, rect, assets_dir, f"page-{page_number:03d}-table-{table_index:02d}")
+    asset_index = 1
+    for group in _caption_groups(captions):
+        crop_rect, _ = _nearest_visual_cluster(page, group, primitives)
+        if crop_rect is None or crop_rect.get_area() < 900:
+            continue
+        rel_path = _save_page_clip(page, crop_rect, assets_dir, f"page-{page_number:03d}-asset-{asset_index:02d}")
         elements.append(
             LayoutElement(
-                kind="table",
-                bbox=rect,
-                markdown=f"![Page {page_number} table {table_index}]({rel_path})",
+                kind="asset",
+                bbox=crop_rect,
+                markdown=f"![Page {page_number} asset {asset_index}]({rel_path})",
             )
         )
+        asset_index += 1
 
-    for figure_index, rect in enumerate(vector_figure_rects, start=1):
-        rel_path = _save_page_clip(page, rect, assets_dir, f"page-{page_number:03d}-vector-figure-{figure_index:02d}")
-        elements.append(
-            LayoutElement(
-                kind="figure",
-                bbox=rect,
-                markdown=f"![Page {page_number} figure {figure_index}]({rel_path})",
-            )
-        )
+        for index, block in enumerate(text_blocks):
+            if block.caption_kind is None and _overlap_ratio(block.bbox, crop_rect) > 0.35:
+                skip_text.add(index)
 
-    page_dict = page.get_text("dict")
-    image_index = 1
     formula_index = 1
-    for block in page_dict.get("blocks", []):
-        rect = fitz.Rect(block.get("bbox", (0, 0, 0, 0)))
-        non_text_rects = [*table_rects, *vector_figure_rects]
-        if any(_overlap_ratio(rect, non_text_rect) > 0.2 for non_text_rect in non_text_rects):
+    for index, block in enumerate(text_blocks):
+        if index in skip_text:
             continue
-
-        if block.get("type") == 1:
-            rel_path = _save_page_clip(page, rect, assets_dir, f"page-{page_number:03d}-figure-{image_index:02d}")
-            elements.append(
-                LayoutElement(
-                    kind="figure",
-                    bbox=rect,
-                    markdown=f"![Page {page_number} figure {image_index}]({rel_path})",
-                )
-            )
-            image_index += 1
-            continue
-
-        if block.get("type") != 0:
-            continue
-
-        text = _block_text(block)
-        if not text:
-            continue
-
-        if _looks_like_formula(text):
-            rel_path = _save_page_clip(page, rect, assets_dir, f"page-{page_number:03d}-formula-{formula_index:02d}")
+        if block.caption_kind is None and _looks_like_formula(block.text, block.bbox, page):
+            rel_path = _save_page_clip(page, block.bbox, assets_dir, f"page-{page_number:03d}-formula-{formula_index:02d}")
             elements.append(
                 LayoutElement(
                     kind="formula",
-                    bbox=rect,
+                    bbox=block.bbox,
                     markdown=f"![Page {page_number} formula {formula_index}]({rel_path})",
-                    text=text,
                 )
             )
+            skip_text.add(index)
             formula_index += 1
+
+    for index, block in enumerate(text_blocks):
+        if index in skip_text:
             continue
+        elements.append(LayoutElement(kind="text", bbox=block.bbox, text=block.text))
 
-        elements.append(LayoutElement(kind="text", bbox=rect, markdown="", text=text))
-
-    elements.sort(key=lambda item: (round(item.bbox.y0, 1), round(item.bbox.x0, 1)))
+    # PDF extraction often gives side-by-side captions y-values that differ by
+    # less than one point. Bucket rows so left-to-right order wins on the page.
+    elements.sort(key=lambda item: (int(item.bbox.y0 // 8), round(item.bbox.x0, 1)))
     return elements
 
 
@@ -305,7 +442,7 @@ def process_pdf(
     original_pdf = paper_dir / pdf_path.name
     shutil.copy2(pdf_path, original_pdf)
 
-    report("正在按页面版式抽取正文、图片、公式和表格", 18)
+    report("正在按图表标题截取整块图表并抽取正文", 18)
     skeleton, plain_text, blocks = extract_markdown_skeleton(original_pdf, paper_dir)
     sample = plain_text[:9000]
 

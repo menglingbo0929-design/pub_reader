@@ -14,3 +14,5 @@
 - Reworked PDF extraction to preserve layout by cropping raster figures, vector figures, detected tables, and equation-like blocks as PNG assets, while translating only normal text blocks in reading order.
 - Made the PowerShell setup script ASCII-safe so desktop shortcut creation works reliably in Windows PowerShell.
 - Fixed startup failure caused by PowerShell writing `config.json` with a UTF-8 BOM.
+- Changed figure/table extraction to be caption-driven: crop one complete visual block per Figure/Table/Algorithm caption, merge side-by-side table captions, and avoid screenshotting ordinary highlighted/boxed text.
+- Tightened translation prompts so short headings and captions are translated directly instead of triggering model help text.
