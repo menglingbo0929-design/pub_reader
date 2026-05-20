@@ -7,6 +7,7 @@ from typing import Callable, Iterable
 
 import httpx
 
+from pub_reader.cancel import CancelCheck, check_cancelled
 from pub_reader.config import AppConfig
 from pub_reader.prompts import (
     FIELD_PROMPT,
@@ -42,7 +43,12 @@ class DeepSeekClient:
         if not self.api_key:
             raise DeepSeekError("DeepSeek API key 不能为空。")
 
-    def complete(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.2,
+        cancel_check: CancelCheck | None = None,
+    ) -> str:
         # DeepSeek uses an OpenAI-compatible chat completion payload.
         payload = {
             "model": self.config.model_name,
@@ -55,6 +61,7 @@ class DeepSeekClient:
         }
         last_error: Exception | None = None
         for attempt in range(1, 4):
+            check_cancelled(cancel_check)
             try:
                 timeout = httpx.Timeout(180, connect=30)
                 with httpx.Client(timeout=timeout) as client:
@@ -70,25 +77,32 @@ class DeepSeekClient:
                 last_error = exc
 
             if attempt < 3:
-                time.sleep(1.5 * attempt)
+                # Poll during retry backoff so a cancel click does not wait for
+                # the full sleep interval before the worker notices it.
+                sleep_until = time.monotonic() + (1.5 * attempt)
+                while time.monotonic() < sleep_until:
+                    check_cancelled(cancel_check)
+                    time.sleep(0.1)
         else:
             raise DeepSeekError(
                 "DeepSeek 请求失败：连接被远端关闭或网络超时。已自动重试 3 次，"
                 "请稍后重试，或检查网络/代理/API 服务状态。"
             ) from last_error
 
+        check_cancelled(cancel_check)
         data = response.json()
         try:
             return data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise DeepSeekError(f"DeepSeek 响应格式无法解析：{data}") from exc
 
-    def detect_field(self, sample_text: str) -> FieldContext:
+    def detect_field(self, sample_text: str, cancel_check: CancelCheck | None = None) -> FieldContext:
         # Field detection happens once from Abstract/Introduction-like text and
         # is reused by all later translation/summary prompts for terminology.
         raw = self.complete(
             [{"role": "user", "content": FIELD_PROMPT.format(text=sample_text[:8000])}],
             temperature=0,
+            cancel_check=cancel_check,
         )
         try:
             data = json.loads(raw.strip("` \n").removeprefix("json").strip())
@@ -105,12 +119,14 @@ class DeepSeekClient:
         chunks: Iterable[str],
         field_context: FieldContext,
         progress: Callable[[int, int], None] | None = None,
+        cancel_check: CancelCheck | None = None,
     ) -> list[str]:
         chunk_list = list(chunks)
         translated: list[str] = []
         field_text = field_context.to_prompt_text()
         total = len(chunk_list)
         for index, chunk in enumerate(chunk_list, start=1):
+            check_cancelled(cancel_check)
             # Progress is reported per chunk because a long paper can require
             # many sequential model calls and otherwise looks frozen in the UI.
             if not chunk.strip():
@@ -131,13 +147,20 @@ class DeepSeekClient:
                         },
                     ],
                     temperature=0.15,
+                    cancel_check=cancel_check,
                 )
             )
+            check_cancelled(cancel_check)
             if progress:
                 progress(index, total)
         return translated
 
-    def summarize(self, paper_text: str, field_context: FieldContext) -> str:
+    def summarize(
+        self,
+        paper_text: str,
+        field_context: FieldContext,
+        cancel_check: CancelCheck | None = None,
+    ) -> str:
         # Summary uses a capped amount of extracted text to avoid oversized API
         # requests while still covering the main paper structure.
         return self.complete(
@@ -152,4 +175,5 @@ class DeepSeekClient:
                 },
             ],
             temperature=0.25,
+            cancel_check=cancel_check,
         )

@@ -8,6 +8,7 @@ from typing import Callable
 
 import fitz
 
+from pub_reader.cancel import CancelCheck, check_cancelled
 from pub_reader.llm import DeepSeekClient
 
 
@@ -23,6 +24,20 @@ class PaperOutputs:
     original_pdf: Path
     translated_md: Path | None = None
     summary_md: Path | None = None
+
+
+def _write_text_atomic(target: Path, content: str, cancel_check: CancelCheck | None = None) -> None:
+    """Write to a temporary sibling first so canceled runs never leave half files."""
+    temp_path = target.with_suffix(target.suffix + ".tmp")
+    try:
+        check_cancelled(cancel_check)
+        temp_path.write_text(content, encoding="utf-8")
+        check_cancelled(cancel_check)
+        temp_path.replace(target)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
 
 
 @dataclass
@@ -786,23 +801,29 @@ def generate_translation(
     api_key: str,
     client: DeepSeekClient,
     progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> PaperOutputs:
     def report(message: str, value: int) -> None:
         if progress:
             progress(message, value)
 
     _ = api_key
+    check_cancelled(cancel_check)
     title, paper_dir, original_pdf = _prepare_paper_workspace(pdf_path, library_folder, progress)
+    check_cancelled(cancel_check)
 
     report("正在抽取纯文本译文骨架，不生成图表截图", 18)
     assets_dir = paper_dir / "assets"
     if assets_dir.exists():
         shutil.rmtree(assets_dir)
+    check_cancelled(cancel_check)
     _skeleton, plain_text, blocks, protected_formulas = extract_markdown_skeleton(original_pdf, paper_dir)
     sample = plain_text[:9000]
+    check_cancelled(cancel_check)
 
     report("正在判断论文领域", 30)
-    field_context = client.detect_field(sample)
+    field_context = client.detect_field(sample, cancel_check=cancel_check)
+    check_cancelled(cancel_check)
 
     report("正在调用 DeepSeek 翻译纯文本 Markdown", 42)
     # Translate large Markdown chunks instead of hundreds of small PDF blocks.
@@ -814,11 +835,13 @@ def generate_translation(
             f"正在调用 DeepSeek 翻译纯文本 Markdown（{done}/{total}）",
             42 + int((done / max(total, 1)) * 52),
         ),
+        cancel_check=cancel_check,
     )
+    check_cancelled(cancel_check)
     translated_md = _normalize_marker_lines(_restore_formula_lines("\n\n".join(translated_blocks), protected_formulas))
 
     translated_path = paper_dir / "translated.md"
-    translated_path.write_text(translated_md, encoding="utf-8")
+    _write_text_atomic(translated_path, translated_md, cancel_check)
 
     report("译文已完成", 100)
     return PaperOutputs(
@@ -836,25 +859,30 @@ def generate_summary(
     api_key: str,
     client: DeepSeekClient,
     progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> PaperOutputs:
     def report(message: str, value: int) -> None:
         if progress:
             progress(message, value)
 
     _ = api_key
+    check_cancelled(cancel_check)
     title, paper_dir, original_pdf = _prepare_paper_workspace(pdf_path, library_folder, progress)
+    check_cancelled(cancel_check)
 
     report("正在抽取正文用于 Summary", 20)
     title, plain_text = _extract_plain_text(original_pdf)
     sample = plain_text[:9000]
+    check_cancelled(cancel_check)
 
     report("正在判断论文领域", 38)
-    field_context = client.detect_field(sample)
+    field_context = client.detect_field(sample, cancel_check=cancel_check)
+    check_cancelled(cancel_check)
 
     report("正在调用 DeepSeek 生成中文 brief summary", 58)
-    summary = client.summarize(plain_text, field_context)
+    summary = client.summarize(plain_text, field_context, cancel_check=cancel_check)
     summary_path = paper_dir / "summary.md"
-    summary_path.write_text(summary, encoding="utf-8")
+    _write_text_atomic(summary_path, summary, cancel_check)
 
     report("Summary 已完成", 100)
     return PaperOutputs(
@@ -872,6 +900,7 @@ def process_pdf(
     api_key: str,
     client: DeepSeekClient,
     progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> PaperOutputs:
     def report(message: str, value: int) -> None:
         if progress:
@@ -883,13 +912,16 @@ def process_pdf(
         api_key,
         client,
         lambda msg, value: report(msg, min(value, 78)),
+        cancel_check,
     )
+    check_cancelled(cancel_check)
     summary = generate_summary(
         translated.original_pdf,
         library_folder,
         api_key,
         client,
         lambda msg, value: report(msg, 78 + int(value * 0.22)),
+        cancel_check,
     )
     report("已完成", 100)
     return PaperOutputs(

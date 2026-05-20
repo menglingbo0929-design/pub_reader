@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QUrl
 
+from pub_reader.cancel import GenerationCancelled
 from pub_reader.config import load_config
 from pub_reader.library import LibraryFolder, LibraryManager, PaperRecord
 from pub_reader.llm import DeepSeekClient, DeepSeekError
@@ -83,6 +85,7 @@ class WorkerSignals(QObject):
     progress = Signal(str, int)
     finished = Signal(object)
     failed = Signal(str)
+    canceled = Signal(str)
 
 
 class ProcessPdfTask(QRunnable):
@@ -93,6 +96,13 @@ class ProcessPdfTask(QRunnable):
         self.api_key = api_key
         self.action = action
         self.signals = WorkerSignals()
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     @Slot()
     def run(self) -> None:
@@ -108,8 +118,11 @@ class ProcessPdfTask(QRunnable):
                 self.api_key,
                 client,
                 lambda msg, value: self.signals.progress.emit(msg, value),
+                self.is_cancelled,
             )
             self.signals.finished.emit(outputs)
+        except GenerationCancelled as exc:
+            self.signals.canceled.emit(str(exc))
         except (DeepSeekError, Exception) as exc:
             self.signals.failed.emit(str(exc))
 
@@ -123,6 +136,10 @@ class MainWindow(QMainWindow):
         self.current_folder: LibraryFolder | None = None
         self.current_pdf: Path | None = None
         self.selected_tree_item: QTreeWidgetItem | None = None
+        self.active_task: ProcessPdfTask | None = None
+        self.active_action: str | None = None
+        self.translate_text = "生成译文"
+        self.summary_text = "生成 Summary"
 
         self.setWindowTitle("Pub Reader")
         self.setMinimumSize(1120, 720)
@@ -196,12 +213,12 @@ class MainWindow(QMainWindow):
         self.upload_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
         self.upload_button.setMinimumHeight(44)
         self.upload_button.clicked.connect(self.choose_pdf)
-        self.translate_button = QPushButton("生成译文")
+        self.translate_button = QPushButton(self.translate_text)
         self.translate_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         self.translate_button.setObjectName("PrimaryButton")
         self.translate_button.setMinimumHeight(44)
         self.translate_button.clicked.connect(lambda: self.generate_outputs("translation"))
-        self.summary_button = QPushButton("生成 Summary")
+        self.summary_button = QPushButton(self.summary_text)
         self.summary_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogInfoView))
         self.summary_button.setObjectName("SecondaryActionButton")
         self.summary_button.setMinimumHeight(44)
@@ -523,12 +540,44 @@ class MainWindow(QMainWindow):
             self.current_pdf = Path(path)
             self.selected_pdf_label.setText(str(self.current_pdf))
 
-    def _set_processing_enabled(self, enabled: bool) -> None:
-        self.upload_button.setEnabled(enabled)
-        self.translate_button.setEnabled(enabled)
-        self.summary_button.setEnabled(enabled)
+    def _enter_processing_state(self, action: str) -> None:
+        self.active_action = action
+        self.upload_button.setEnabled(False)
+        self.progress.setValue(0)
+        if action == "translation":
+            self.translate_button.setText("取消译文")
+            self.translate_button.setEnabled(True)
+            self.summary_button.setEnabled(False)
+        else:
+            self.summary_button.setText("取消 Summary")
+            self.summary_button.setEnabled(True)
+            self.translate_button.setEnabled(False)
+
+    def _reset_processing_state(self) -> None:
+        self.active_task = None
+        self.active_action = None
+        self.upload_button.setEnabled(True)
+        self.translate_button.setText(self.translate_text)
+        self.summary_button.setText(self.summary_text)
+        self.translate_button.setEnabled(True)
+        self.summary_button.setEnabled(True)
+        self.progress.setValue(0)
+
+    def cancel_active_task(self) -> None:
+        if not self.active_task:
+            return
+        self.active_task.cancel()
+        self.statusBar().showMessage("正在取消生成，等待当前 DeepSeek 请求返回后停止...")
+        if self.active_action == "translation":
+            self.translate_button.setEnabled(False)
+        elif self.active_action == "summary":
+            self.summary_button.setEnabled(False)
 
     def generate_outputs(self, action: str) -> None:
+        if self.active_task:
+            if action == self.active_action:
+                self.cancel_active_task()
+            return
         if not self.current_folder:
             QMessageBox.warning(self, "需要文件夹", "请先选择或新建一个文件夹。")
             return
@@ -543,13 +592,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "API key 为空", "请输入 DeepSeek API key。")
             return
 
-        self._set_processing_enabled(False)
-        self.progress.setValue(0)
+        self._enter_processing_state(action)
         # The worker emits progress/status signals back to Qt's main thread.
         task = ProcessPdfTask(self.current_pdf, self.current_folder, dialog.api_key, action)
+        self.active_task = task
         task.signals.progress.connect(self.on_progress)
         task.signals.finished.connect(self.on_finished)
         task.signals.failed.connect(self.on_failed)
+        task.signals.canceled.connect(self.on_canceled)
         self.thread_pool.start(task)
 
     def on_progress(self, message: str, value: int) -> None:
@@ -557,18 +607,22 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def on_finished(self, outputs: PaperOutputs) -> None:
-        self._set_processing_enabled(True)
-        self.progress.setValue(100)
-        self.statusBar().showMessage("生成完成")
+        self._reset_processing_state()
+        self.statusBar().showMessage("生成完成，进度已复位")
         self.refresh_folders()
         generated = [path for path in [outputs.translated_md, outputs.summary_md] if path is not None]
         QMessageBox.information(self, "生成完成", "已生成：\n" + "\n".join(str(path) for path in generated))
 
     def on_failed(self, message: str) -> None:
-        self._set_processing_enabled(True)
-        self.progress.setValue(0)
+        self._reset_processing_state()
         self.statusBar().showMessage("生成失败，进度已复位")
         QMessageBox.critical(self, "生成失败", message)
+
+    def on_canceled(self, message: str) -> None:
+        self._reset_processing_state()
+        self.refresh_folders()
+        self.statusBar().showMessage("已取消生成，进度已复位")
+        QMessageBox.information(self, "已取消", f"{message}\n半截输出已清理，旧的完整文件会保留。")
 
     def show_paper_detail(self, paper: PaperRecord) -> None:
         links = [f"<h2>{paper.name}</h2>"]
