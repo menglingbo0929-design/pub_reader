@@ -13,6 +13,7 @@ from pub_reader.llm import DeepSeekClient
 
 ProgressCallback = Callable[[str, int], None]
 CAPTION_RE = re.compile(r"^(fig(?:ure)?\.?|table|algorithm)\s*\d+", re.IGNORECASE)
+MARKER_LINE = "#" * 80
 
 
 @dataclass
@@ -69,6 +70,10 @@ def _guess_title(doc: fitz.Document, pdf_path: Path) -> str:
 
 def _start_page_index(doc: fitz.Document) -> int:
     # Skip front matter where possible and begin from Abstract/Introduction.
+    if len(doc):
+        first_page_blocks = _text_blocks_with_heading_levels(doc[0], skip_first_page_metadata=True)
+        if any(len(block.text.strip()) >= 180 for block in first_page_blocks):
+            return 0
     pattern = re.compile(r"\b(abstract|introduction)\b", re.IGNORECASE)
     for index, page in enumerate(doc):
         text = page.get_text("text")
@@ -278,7 +283,30 @@ def _heading_level(text: str, font_size: float, is_bold: bool, page_font_size: f
     return None
 
 
-def _text_blocks_with_heading_levels(page: fitz.Page) -> list[LayoutElement]:
+def _is_noise_block(text: str, bbox: fitz.Rect, page: fitz.Page) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if re.fullmatch(r"\d+", stripped) and bbox.y0 > page.rect.height * 0.88:
+        return True
+    if "arXiv:" in stripped:
+        return True
+    if stripped.startswith("∗Equal contribution"):
+        return True
+    if stripped.startswith("*Equal contribution"):
+        return True
+    return False
+
+
+def _first_body_y(blocks: list[LayoutElement], page: fitz.Page) -> float | None:
+    for block in blocks:
+        text = block.text.strip()
+        if len(text) >= 180 and block.heading_level is None and block.bbox.y0 < page.rect.height * 0.65:
+            return block.bbox.y0
+    return None
+
+
+def _text_blocks_with_heading_levels(page: fitz.Page, skip_first_page_metadata: bool = False) -> list[LayoutElement]:
     raw_blocks = [block for block in page.get_text("dict").get("blocks", []) if block.get("type") == 0]
     font_sizes: list[float] = []
     for block in raw_blocks:
@@ -292,24 +320,35 @@ def _text_blocks_with_heading_levels(page: fitz.Page) -> list[LayoutElement]:
         text = _block_text(block)
         if not text:
             continue
+        bbox = fitz.Rect(block["bbox"])
+        if _is_noise_block(text, bbox, page):
+            continue
         font_size, is_bold = _block_font_stats(block)
         elements.append(
             LayoutElement(
                 kind="text",
-                bbox=fitz.Rect(block["bbox"]),
+                bbox=bbox,
                 text=text,
                 heading_level=_heading_level(text, font_size, is_bold, page_font_size),
             )
         )
+    if skip_first_page_metadata:
+        first_body_y = _first_body_y(elements, page)
+        if first_body_y is not None:
+            elements = [
+                element
+                for element in elements
+                if element.bbox.y0 >= first_body_y - 3 and not element.text.startswith("Project Page:")
+            ]
     return elements
 
 
 def _caption_marker_text(group: list[TextBlock], explanation: str | None = None) -> str:
-    lines = ["#"]
+    lines = [MARKER_LINE]
     if explanation:
         lines.append(explanation)
     lines.extend(block.text for block in group)
-    lines.append("#")
+    lines.append(MARKER_LINE)
     return "\n".join(lines)
 
 
@@ -345,8 +384,51 @@ def _nearby_caption_explanation(
     return text_blocks[best_index].text, best_index
 
 
-def _text_only_layout_elements(page: fitz.Page) -> list[LayoutElement]:
-    raw_text_blocks = _text_blocks_with_heading_levels(page)
+def _is_inside_caption_visual(block: LayoutElement, group_bbox: fitz.Rect, crop_rect: fitz.Rect | None) -> bool:
+    if crop_rect is not None and (
+        block.bbox.intersects(crop_rect) or _overlap_ratio(block.bbox, crop_rect) > 0.03
+    ):
+        return True
+    return False
+
+
+def _skip_table_or_algorithm_body(
+    group: list[TextBlock],
+    raw_text_blocks: list[LayoutElement],
+    skip_text: set[int],
+    crop_rect: fitz.Rect | None,
+) -> None:
+    caption_kind = group[0].caption_kind
+    group_bbox = group[0].bbox
+    for caption in group[1:]:
+        group_bbox |= caption.bbox
+
+    for index, block in enumerate(raw_text_blocks):
+        if block.text in {caption.text for caption in group}:
+            skip_text.add(index)
+            continue
+        if _is_inside_caption_visual(block, group_bbox, crop_rect):
+            skip_text.add(index)
+            continue
+
+        if caption_kind == "algorithm":
+            if block.heading_level is not None:
+                continue
+            below_caption = block.bbox.y0 >= group_bbox.y1 - 2
+            if below_caption and block.bbox.y0 - group_bbox.y1 < 180:
+                skip_text.add(index)
+
+        if caption_kind == "table":
+            above_caption = block.bbox.y1 <= group_bbox.y0 + 2
+            close_to_caption = 0 <= group_bbox.y0 - block.bbox.y1 <= 150
+            wide_overlap = _x_overlap_ratio(block.bbox, group_bbox) > 0.2
+            tableish = "|" in block.text or "\n" in block.text or sum(char.isdigit() for char in block.text) >= 1
+            if above_caption and close_to_caption and wide_overlap and tableish:
+                skip_text.add(index)
+
+
+def _text_only_layout_elements(page: fitz.Page, skip_first_page_metadata: bool = False) -> list[LayoutElement]:
+    raw_text_blocks = _text_blocks_with_heading_levels(page, skip_first_page_metadata)
     caption_blocks = [
         TextBlock(block.bbox, block.text, _caption_kind(block.text))
         for block in raw_text_blocks
@@ -366,17 +448,15 @@ def _text_only_layout_elements(page: fitz.Page) -> list[LayoutElement]:
         if explanation_index is not None:
             skip_text.add(explanation_index)
 
-        if crop_rect is not None:
-            for index, block in enumerate(raw_text_blocks):
-                if block.text in {caption.text for caption in group}:
-                    skip_text.add(index)
-                    continue
-                if block.bbox.intersects(crop_rect) or _overlap_ratio(block.bbox, crop_rect) > 0.05:
-                    skip_text.add(index)
-
         group_bbox = group[0].bbox
         for caption in group[1:]:
             group_bbox |= caption.bbox
+        if crop_rect is not None:
+            for index, block in enumerate(raw_text_blocks):
+                if _is_inside_caption_visual(block, group_bbox, crop_rect):
+                    skip_text.add(index)
+        _skip_table_or_algorithm_body(group, raw_text_blocks, skip_text, crop_rect)
+
         elements.append(
             LayoutElement(
                 kind="caption_marker",
@@ -423,6 +503,66 @@ def _split_markdown_chunks(markdown: str, max_chars: int = 9000) -> list[str]:
     if current:
         chunks.append("\n\n".join(current))
     return chunks
+
+
+FORMULA_TOKEN_RE = re.compile(r"\[\[\[FORMULA_(\d{4})\]\]\]")
+
+
+def _looks_like_formula_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if len(stripped) > 260:
+        return False
+    compact = re.sub(r"\s+", "", stripped)
+    math_chars = set("=∼∈∑∏√σθπβλμϕΦΨℓ≤≥≠≈→←↔∀∃")
+    math_count = sum(1 for char in compact if char in math_chars)
+    if re.fullmatch(r"\(?\d+\)?", stripped):
+        return True
+    if re.fullmatch(r"(max|min|argmax|argmin)\s*[A-Za-z𝑨-𝒁𝐀-𝐙]?", stripped):
+        return True
+    if math_count >= 2 and any(char in compact for char in "=∼∈σθβλ"):
+        return True
+    return False
+
+
+def _protect_formula_lines(markdown: str) -> tuple[str, dict[str, str]]:
+    protected: dict[str, str] = {}
+    output_lines: list[str] = []
+    counter = 0
+    in_marker = False
+
+    for line in markdown.splitlines():
+        if line == MARKER_LINE:
+            in_marker = not in_marker
+            output_lines.append(line)
+            continue
+        if not in_marker and _looks_like_formula_line(line):
+            token = f"[[[FORMULA_{counter:04d}]]]"
+            protected[token] = line
+            output_lines.append(token)
+            counter += 1
+        else:
+            output_lines.append(line)
+    return "\n".join(output_lines), protected
+
+
+def _restore_formula_lines(markdown: str, protected: dict[str, str]) -> str:
+    restored = markdown
+    for token, formula in protected.items():
+        restored = restored.replace(token, formula)
+    return restored
+
+
+def _normalize_marker_lines(markdown: str) -> str:
+    lines = []
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if stripped and set(stripped) == {"#"}:
+            lines.append(MARKER_LINE)
+        else:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def _caption_groups(captions: list[TextBlock]) -> list[list[TextBlock]]:
@@ -614,7 +754,7 @@ def _layout_elements(page: fitz.Page, page_number: int, assets_dir: Path) -> lis
     return elements
 
 
-def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, str, list[str]]:
+def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, str, list[str], dict[str, str]]:
     doc = fitz.open(pdf_path)
     start_page = _start_page_index(doc)
     title = _guess_title(doc, pdf_path)
@@ -625,13 +765,19 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
         page = doc[page_index]
         plain_text_parts.append(_clean_text(page.get_text("text")))
 
-        for element in _text_only_layout_elements(page):
+        for element in _text_only_layout_elements(page, skip_first_page_metadata=(page_index == 0)):
             markdown_parts.append(_markdown_for_text_element(element))
             markdown_parts.append("")
 
     doc.close()
     source_markdown = "\n".join(markdown_parts)
-    return source_markdown, "\n\n".join(plain_text_parts), _split_markdown_chunks(source_markdown)
+    protected_markdown, protected_formulas = _protect_formula_lines(source_markdown)
+    return (
+        protected_markdown,
+        "\n\n".join(plain_text_parts),
+        _split_markdown_chunks(protected_markdown),
+        protected_formulas,
+    )
 
 
 def generate_translation(
@@ -652,7 +798,7 @@ def generate_translation(
     assets_dir = paper_dir / "assets"
     if assets_dir.exists():
         shutil.rmtree(assets_dir)
-    skeleton, plain_text, blocks = extract_markdown_skeleton(original_pdf, paper_dir)
+    _skeleton, plain_text, blocks, protected_formulas = extract_markdown_skeleton(original_pdf, paper_dir)
     sample = plain_text[:9000]
 
     report("正在判断论文领域", 30)
@@ -669,7 +815,7 @@ def generate_translation(
             42 + int((done / max(total, 1)) * 52),
         ),
     )
-    translated_md = "\n\n".join(translated_blocks)
+    translated_md = _normalize_marker_lines(_restore_formula_lines("\n\n".join(translated_blocks), protected_formulas))
 
     translated_path = paper_dir / "translated.md"
     translated_path.write_text(translated_md, encoding="utf-8")
