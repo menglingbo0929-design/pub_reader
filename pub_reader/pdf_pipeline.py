@@ -43,6 +43,7 @@ class LayoutElement:
     bbox: fitz.Rect
     markdown: str = ""
     text: str = ""
+    heading_level: int | None = None
 
 
 def _clean_text(text: str) -> str:
@@ -244,6 +245,186 @@ def _looks_like_formula(text: str, bbox: fitz.Rect, page: fitz.Page) -> bool:
     return centered and (has_equation_marker or ("=" in compact and symbol_count >= 2))
 
 
+def _block_font_stats(block: dict) -> tuple[float, bool]:
+    sizes: list[float] = []
+    bold = False
+    for line in block.get("lines", []):
+        for span in line.get("spans", []):
+            sizes.append(float(span.get("size", 0)))
+            font_name = str(span.get("font", "")).lower()
+            if "bold" in font_name or "semibold" in font_name:
+                bold = True
+    return (max(sizes) if sizes else 0.0), bold
+
+
+def _heading_level(text: str, font_size: float, is_bold: bool, page_font_size: float) -> int | None:
+    stripped = text.strip()
+    if not stripped or len(stripped) > 160:
+        return None
+    if _caption_kind(stripped):
+        return None
+    if re.search(r"[.!?。！？]\s*$", stripped) and not re.match(r"^\d+(\.\d+)*\s+\S+", stripped):
+        return None
+    numbered = re.match(r"^\d+(\.\d+)*\s+[A-Z][A-Za-z0-9 /,&()\-]+", stripped)
+    section_word = re.match(
+        r"^(abstract|introduction|background|related work|method|methods|model|algorithm|experiment|experiments|results|discussion|conclusion|appendix)\b",
+        stripped,
+        re.IGNORECASE,
+    )
+    if numbered or section_word or is_bold or font_size >= page_font_size + 1.0:
+        if re.match(r"^\d+\.\d+", stripped):
+            return 3
+        return 2
+    return None
+
+
+def _text_blocks_with_heading_levels(page: fitz.Page) -> list[LayoutElement]:
+    raw_blocks = [block for block in page.get_text("dict").get("blocks", []) if block.get("type") == 0]
+    font_sizes: list[float] = []
+    for block in raw_blocks:
+        size, _ = _block_font_stats(block)
+        if size:
+            font_sizes.append(size)
+    page_font_size = sorted(font_sizes)[len(font_sizes) // 2] if font_sizes else 10.0
+
+    elements: list[LayoutElement] = []
+    for block in raw_blocks:
+        text = _block_text(block)
+        if not text:
+            continue
+        font_size, is_bold = _block_font_stats(block)
+        elements.append(
+            LayoutElement(
+                kind="text",
+                bbox=fitz.Rect(block["bbox"]),
+                text=text,
+                heading_level=_heading_level(text, font_size, is_bold, page_font_size),
+            )
+        )
+    return elements
+
+
+def _caption_marker_text(group: list[TextBlock], explanation: str | None = None) -> str:
+    lines = ["#"]
+    if explanation:
+        lines.append(explanation)
+    lines.extend(block.text for block in group)
+    lines.append("#")
+    return "\n".join(lines)
+
+
+def _nearby_caption_explanation(
+    caption_group: list[TextBlock],
+    text_blocks: list[LayoutElement],
+    used_text: set[int],
+) -> tuple[str | None, int | None]:
+    group_bbox = caption_group[0].bbox
+    for caption in caption_group[1:]:
+        group_bbox |= caption.bbox
+
+    best_index: int | None = None
+    best_gap = 10_000.0
+    for index, block in enumerate(text_blocks):
+        if index in used_text:
+            continue
+        text = block.text.strip()
+        if not text or _caption_kind(text) or block.heading_level is not None:
+            continue
+        if "\n" in text or len(text) < 12 or len(text) > 260:
+            continue
+        if not re.search(r"[A-Za-z]", text):
+            continue
+        if sum(char.isdigit() for char in text) > len(text) * 0.35:
+            continue
+        gap = group_bbox.y0 - block.bbox.y1
+        if 0 <= gap <= 22 and _x_overlap_ratio(block.bbox, group_bbox) > 0.25 and gap < best_gap:
+            best_index = index
+            best_gap = gap
+    if best_index is None:
+        return None, None
+    return text_blocks[best_index].text, best_index
+
+
+def _text_only_layout_elements(page: fitz.Page) -> list[LayoutElement]:
+    raw_text_blocks = _text_blocks_with_heading_levels(page)
+    caption_blocks = [
+        TextBlock(block.bbox, block.text, _caption_kind(block.text))
+        for block in raw_text_blocks
+        if _caption_kind(block.text) is not None
+    ]
+    primitive_text_blocks = [
+        TextBlock(block.bbox, block.text, _caption_kind(block.text))
+        for block in raw_text_blocks
+    ]
+    primitives = _primitive_rects(page, primitive_text_blocks)
+    elements: list[LayoutElement] = []
+    skip_text: set[int] = set()
+
+    for group in _caption_groups(caption_blocks):
+        crop_rect, _ = _nearest_visual_cluster(page, group, primitives)
+        explanation, explanation_index = _nearby_caption_explanation(group, raw_text_blocks, skip_text)
+        if explanation_index is not None:
+            skip_text.add(explanation_index)
+
+        if crop_rect is not None:
+            for index, block in enumerate(raw_text_blocks):
+                if block.text in {caption.text for caption in group}:
+                    skip_text.add(index)
+                    continue
+                if block.bbox.intersects(crop_rect) or _overlap_ratio(block.bbox, crop_rect) > 0.05:
+                    skip_text.add(index)
+
+        group_bbox = group[0].bbox
+        for caption in group[1:]:
+            group_bbox |= caption.bbox
+        elements.append(
+            LayoutElement(
+                kind="caption_marker",
+                bbox=group_bbox,
+                text=_caption_marker_text(group, explanation),
+            )
+        )
+
+    for index, block in enumerate(raw_text_blocks):
+        if index in skip_text:
+            continue
+        if _caption_kind(block.text) is not None:
+            continue
+        elements.append(block)
+
+    elements.sort(key=lambda item: (int(item.bbox.y0 // 8), round(item.bbox.x0, 1)))
+    return elements
+
+
+def _markdown_for_text_element(element: LayoutElement) -> str:
+    text = element.text.strip()
+    if element.kind == "caption_marker":
+        return text
+    if element.heading_level:
+        prefix = "#" * element.heading_level
+        heading_text = re.sub(r"\s+", " ", text).strip()
+        return f"{prefix} {heading_text}"
+    return text
+
+
+def _split_markdown_chunks(markdown: str, max_chars: int = 9000) -> list[str]:
+    parts = [part.strip() for part in markdown.split("\n\n") if part.strip()]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for part in parts:
+        part_len = len(part) + 2
+        if current and current_len + part_len > max_chars:
+            chunks.append("\n\n".join(current))
+            current = []
+            current_len = 0
+        current.append(part)
+        current_len += part_len
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
 def _caption_groups(captions: list[TextBlock]) -> list[list[TextBlock]]:
     groups: list[list[TextBlock]] = []
     used: set[int] = set()
@@ -435,30 +616,22 @@ def _layout_elements(page: fitz.Page, page_number: int, assets_dir: Path) -> lis
 
 def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, str, list[str]]:
     doc = fitz.open(pdf_path)
-    assets_dir = output_dir / "assets"
-    assets_dir.mkdir(parents=True, exist_ok=True)
     start_page = _start_page_index(doc)
     title = _guess_title(doc, pdf_path)
     markdown_parts = [f"# {title}", ""]
     plain_text_parts: list[str] = []
-    translatable_blocks: list[str] = []
 
     for page_index in range(start_page, len(doc)):
         page = doc[page_index]
-        page_number = page_index + 1
-        markdown_parts.append(f"\n\n## Page {page_number}\n")
         plain_text_parts.append(_clean_text(page.get_text("text")))
 
-        for element in _layout_elements(page, page_number, assets_dir):
-            if element.kind == "text":
-                translatable_blocks.append(element.text)
-                markdown_parts.append(f"{{{{TRANSLATION_BLOCK_{len(translatable_blocks) - 1}}}}}")
-            else:
-                markdown_parts.append(element.markdown)
+        for element in _text_only_layout_elements(page):
+            markdown_parts.append(_markdown_for_text_element(element))
             markdown_parts.append("")
 
     doc.close()
-    return "\n".join(markdown_parts), "\n\n".join(plain_text_parts), translatable_blocks
+    source_markdown = "\n".join(markdown_parts)
+    return source_markdown, "\n\n".join(plain_text_parts), _split_markdown_chunks(source_markdown)
 
 
 def generate_translation(
@@ -475,27 +648,28 @@ def generate_translation(
     _ = api_key
     title, paper_dir, original_pdf = _prepare_paper_workspace(pdf_path, library_folder, progress)
 
-    report("正在按图表标题截取整块图表并抽取正文", 18)
+    report("正在抽取纯文本译文骨架，不生成图表截图", 18)
+    assets_dir = paper_dir / "assets"
+    if assets_dir.exists():
+        shutil.rmtree(assets_dir)
     skeleton, plain_text, blocks = extract_markdown_skeleton(original_pdf, paper_dir)
     sample = plain_text[:9000]
 
     report("正在判断论文领域", 30)
     field_context = client.detect_field(sample)
 
-    report("正在调用 DeepSeek 翻译正文", 42)
-    # Translation is the longest stage, so report every chunk to keep the UI
-    # from looking frozen during a long paper.
+    report("正在调用 DeepSeek 翻译纯文本 Markdown", 42)
+    # Translate large Markdown chunks instead of hundreds of small PDF blocks.
+    # This avoids asset generation and reduces network round trips.
     translated_blocks = client.translate_chunks(
         blocks,
         field_context,
         progress=lambda done, total: report(
-            f"正在调用 DeepSeek 翻译正文（{done}/{total}）",
+            f"正在调用 DeepSeek 翻译纯文本 Markdown（{done}/{total}）",
             42 + int((done / max(total, 1)) * 52),
         ),
     )
-    translated_md = skeleton
-    for index, translated in enumerate(translated_blocks):
-        translated_md = translated_md.replace(f"{{{{TRANSLATION_BLOCK_{index}}}}}", translated)
+    translated_md = "\n\n".join(translated_blocks)
 
     translated_path = paper_dir / "translated.md"
     translated_path.write_text(translated_md, encoding="utf-8")
@@ -557,52 +731,25 @@ def process_pdf(
         if progress:
             progress(message, value)
 
-    pdf_path = Path(pdf_path)
-    report("正在读取 PDF", 8)
-    with fitz.open(pdf_path) as doc:
-        title = _guess_title(doc, pdf_path)
-
-    paper_dir = _paper_dir_for_pdf(library_folder, pdf_path)
-    paper_dir.mkdir(parents=True, exist_ok=True)
-    original_pdf = paper_dir / pdf_path.name
-    if pdf_path.resolve() != original_pdf.resolve():
-        shutil.copy2(pdf_path, original_pdf)
-
-    report("正在按图表标题截取整块图表并抽取正文", 18)
-    skeleton, plain_text, blocks = extract_markdown_skeleton(original_pdf, paper_dir)
-    sample = plain_text[:9000]
-
-    report("正在判断论文领域", 30)
-    field_context = client.detect_field(sample)
-
-    report("正在调用 DeepSeek 翻译正文", 42)
-    # Translation is the longest stage. Progress is mapped to 42%-76% and the
-    # summary stage starts after that, so the progress bar keeps moving.
-    translated_blocks = client.translate_chunks(
-        blocks,
-        field_context,
-        progress=lambda done, total: report(
-            f"正在调用 DeepSeek 翻译正文（{done}/{total}）",
-            42 + int((done / max(total, 1)) * 34),
-        ),
+    translated = generate_translation(
+        pdf_path,
+        library_folder,
+        api_key,
+        client,
+        lambda msg, value: report(msg, min(value, 78)),
     )
-    translated_md = skeleton
-    for index, translated in enumerate(translated_blocks):
-        translated_md = translated_md.replace(f"{{{{TRANSLATION_BLOCK_{index}}}}}", translated)
-
-    translated_path = paper_dir / "translated.md"
-    translated_path.write_text(translated_md, encoding="utf-8")
-
-    report("正在生成中文 brief summary", 82)
-    summary = client.summarize(plain_text, field_context)
-    summary_path = paper_dir / "summary.md"
-    summary_path.write_text(summary, encoding="utf-8")
-
+    summary = generate_summary(
+        translated.original_pdf,
+        library_folder,
+        api_key,
+        client,
+        lambda msg, value: report(msg, 78 + int(value * 0.22)),
+    )
     report("已完成", 100)
     return PaperOutputs(
-        title=title,
-        paper_dir=paper_dir,
-        original_pdf=original_pdf,
-        translated_md=translated_path,
-        summary_md=summary_path,
+        title=translated.title,
+        paper_dir=translated.paper_dir,
+        original_pdf=translated.original_pdf,
+        translated_md=translated.translated_md,
+        summary_md=summary.summary_md,
     )
