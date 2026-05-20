@@ -155,6 +155,8 @@ class MainWindow(QMainWindow):
         self.library_tree = QTreeWidget()
         self.library_tree.setHeaderHidden(True)
         self.library_tree.setIndentation(18)
+        self.library_tree.setRootIsDecorated(False)
+        self.library_tree.setExpandsOnDoubleClick(False)
         self.library_tree.currentItemChanged.connect(self.on_tree_selection_changed)
         self.library_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
 
@@ -289,6 +291,10 @@ class MainWindow(QMainWindow):
             QTreeWidget::item:selected {
                 background: #CCFBF1;
                 color: #134E4A;
+            }
+            QTreeWidget::branch {
+                image: none;
+                width: 0px;
             }
             QPushButton {
                 min-height: 36px;
@@ -438,7 +444,7 @@ class MainWindow(QMainWindow):
     def on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         data = item.data(0, Qt.UserRole) or {}
         path = data.get("path")
-        if item.childCount():
+        if data.get("kind") in {"collection", "paper", "dir"}:
             item.setExpanded(not item.isExpanded())
             return
         if path:
