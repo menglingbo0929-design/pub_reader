@@ -214,8 +214,8 @@ class MainWindow(QMainWindow):
             painter.drawLine(8, 12, 14, 12)
             painter.drawLine(8, 15, 14, 15)
         elif kind == "upload":
-            painter.drawArc(4, 8, 14, 8, 20 * 16, 140 * 16)
-            painter.drawLine(11, 14, 11, 5)
+            painter.drawRoundedRect(5, 12, 12, 5, 1.5, 1.5)
+            painter.drawLine(11, 13, 11, 5)
             painter.drawLine(8, 8, 11, 5)
             painter.drawLine(14, 8, 11, 5)
         elif kind == "refresh":
@@ -242,12 +242,15 @@ class MainWindow(QMainWindow):
             painter.drawLine(15, 7, 15, 12)
         elif kind == "app":
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#2563EB"))
+            painter.setBrush(QColor(color))
             painter.drawRoundedRect(3, 3, 16, 16, 4, 4)
-            painter.setBrush(QColor("#DBEAFE"))
-            painter.drawEllipse(7, 7, 8, 8)
             painter.setBrush(QColor("#FFFFFF"))
-            painter.drawEllipse(9, 9, 4, 4)
+            painter.drawRoundedRect(6, 7, 5, 9, 1.2, 1.2)
+            painter.drawRoundedRect(11, 7, 5, 9, 1.2, 1.2)
+            painter.setPen(QPen(QColor("#DBEAFE"), 1.1))
+            painter.drawLine(11, 8, 11, 16)
+            painter.drawLine(7, 10, 10, 10)
+            painter.drawLine(12, 10, 15, 10)
         elif kind == "more":
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(color))
@@ -271,6 +274,75 @@ class MainWindow(QMainWindow):
         elif kind == "chevron":
             painter.drawLine(8, 6, 14, 11)
             painter.drawLine(14, 11, 8, 16)
+        elif kind == "collapse":
+            painter.drawLine(14, 6, 9, 11)
+            painter.drawLine(9, 11, 14, 16)
+            painter.drawLine(18, 6, 13, 11)
+            painter.drawLine(13, 11, 18, 16)
+        elif kind == "pdf":
+            painter.setPen(QPen(QColor("#EF4444"), 1.5))
+            painter.drawRoundedRect(5, 3, 12, 16, 2, 2)
+            painter.drawLine(12, 3, 17, 8)
+            painter.drawLine(12, 3, 12, 8)
+            painter.drawLine(12, 8, 17, 8)
+            painter.setBrush(QColor("#FEE2E2"))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(5, 12, 12, 6, 1.5, 1.5)
+            painter.setPen(QPen(QColor("#B91C1C"), 1.0))
+            font = painter.font()
+            font.setPointSize(4)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(6, 17, "PDF")
+        elif kind == "md":
+            painter.setPen(QPen(QColor(color), 1.5))
+            painter.drawRoundedRect(5, 3, 12, 16, 2, 2)
+            painter.drawLine(12, 3, 17, 8)
+            painter.drawLine(12, 3, 12, 8)
+            painter.drawLine(12, 8, 17, 8)
+            font = painter.font()
+            font.setPointSize(5)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(7, 16, "M")
+        elif kind == "calendar":
+            painter.drawRoundedRect(4, 5, 14, 13, 2, 2)
+            painter.drawLine(4, 9, 18, 9)
+            painter.drawLine(8, 3, 8, 7)
+            painter.drawLine(14, 3, 14, 7)
+        elif kind == "search":
+            painter.drawEllipse(5, 5, 9, 9)
+            painter.drawLine(13, 13, 17, 17)
+        elif kind == "plus":
+            painter.drawLine(11, 5, 11, 17)
+            painter.drawLine(5, 11, 17, 11)
+        elif kind == "book":
+            painter.setPen(QPen(QColor(color), 1.5))
+            painter.drawRoundedRect(4, 5, 7, 13, 1.5, 1.5)
+            painter.drawRoundedRect(11, 5, 7, 13, 1.5, 1.5)
+            painter.drawLine(11, 6, 11, 18)
+            painter.drawLine(7, 9, 10, 9)
+            painter.drawLine(13, 9, 16, 9)
+        elif kind == "output":
+            painter.drawRoundedRect(5, 4, 12, 14, 2, 2)
+            painter.drawLine(8, 8, 14, 8)
+            painter.drawLine(8, 12, 14, 12)
+            painter.drawLine(8, 16, 12, 16)
+        elif kind == "document_search":
+            painter.setPen(QPen(QColor(color), 1.5))
+            painter.drawRoundedRect(4, 3, 10, 15, 2, 2)
+            painter.drawLine(10, 3, 14, 7)
+            painter.drawLine(10, 3, 10, 7)
+            painter.drawLine(10, 7, 14, 7)
+            painter.drawEllipse(10, 11, 6, 6)
+            painter.drawLine(15, 16, 18, 19)
+        elif kind == "document_edit":
+            painter.setPen(QPen(QColor(color), 1.5))
+            painter.drawRoundedRect(5, 3, 11, 16, 2, 2)
+            painter.drawLine(8, 8, 13, 8)
+            painter.drawLine(8, 11, 12, 11)
+            painter.drawLine(11, 17, 18, 10)
+            painter.drawLine(17, 9, 19, 11)
         painter.end()
         return QIcon(pixmap)
 
@@ -307,7 +379,7 @@ class MainWindow(QMainWindow):
 
         self.sidebar_toggle_button = QPushButton()
         self.sidebar_toggle_button.setObjectName("SidebarToggle")
-        self.sidebar_toggle_button.setIcon(self._make_icon("menu", "#475569"))
+        self.sidebar_toggle_button.setIcon(self._make_icon("collapse", "#475569"))
         self.sidebar_toggle_button.setIconSize(QSize(22, 22))
         self.sidebar_toggle_button.setToolTip("展开/收起目录")
         self.sidebar_toggle_button.setMinimumSize(44, 44)
@@ -327,15 +399,15 @@ class MainWindow(QMainWindow):
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setMinimumWidth(320)
-        self.sidebar.setMaximumWidth(360)
+        self.sidebar.setMinimumWidth(300)
+        self.sidebar.setMaximumWidth(334)
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(18, 18, 18, 16)
         sidebar_layout.setSpacing(14)
 
         self.sidebar_header = QHBoxLayout()
         self.sidebar_header.setSpacing(10)
-        app_title = QLabel("项目")
+        app_title = QLabel("项目库")
         app_title.setObjectName("AppTitle")
         self.sidebar_header.addWidget(app_title, 1)
         self.sidebar_header.addWidget(self.sidebar_toggle_button)
@@ -343,6 +415,7 @@ class MainWindow(QMainWindow):
         self.search_input = QLineEdit()
         self.search_input.setObjectName("SearchInput")
         self.search_input.setPlaceholderText("搜索项目或文件...")
+        self.search_input.addAction(self._make_icon("search", "#64748B"), QLineEdit.TrailingPosition)
         self.search_input.textChanged.connect(lambda _text: self.refresh_folders())
 
         self.library_tree = QTreeWidget()
@@ -356,29 +429,24 @@ class MainWindow(QMainWindow):
         folder_buttons = QHBoxLayout()
         folder_buttons.setSpacing(8)
         new_folder = QPushButton("新建文件夹")
-        refresh_folder = QPushButton("刷新")
-        rename_folder = QPushButton("重命名")
         delete_folder = QPushButton("删除")
+        rename_folder = QPushButton("重命名")
         new_folder.setObjectName("SidebarAction")
-        refresh_folder.setObjectName("SidebarAction")
-        rename_folder.setObjectName("SidebarAction")
         delete_folder.setObjectName("SidebarAction")
+        rename_folder.setObjectName("SidebarAction")
         for button, icon_name, icon_color in [
-            (new_folder, "folder", "#2563EB"),
-            (refresh_folder, "refresh", "#EF4444"),
+            (new_folder, "plus", "#2563EB"),
+            (delete_folder, "trash", "#2563EB"),
             (rename_folder, "edit", "#2563EB"),
-            (delete_folder, "trash", "#64748B"),
         ]:
             button.setIcon(self._make_icon(icon_name, icon_color))
             button.setIconSize(QSize(16, 16))
         new_folder.clicked.connect(self.create_folder)
-        refresh_folder.clicked.connect(self.refresh_folders)
-        rename_folder.clicked.connect(self.rename_folder)
         delete_folder.clicked.connect(self.delete_folder)
+        rename_folder.clicked.connect(self.rename_folder)
         folder_buttons.addWidget(new_folder)
-        folder_buttons.addWidget(refresh_folder)
-        folder_buttons.addWidget(rename_folder)
         folder_buttons.addWidget(delete_folder)
+        folder_buttons.addWidget(rename_folder)
 
         sidebar_layout.addLayout(self.sidebar_header)
         sidebar_layout.addWidget(self.search_input)
@@ -397,7 +465,7 @@ class MainWindow(QMainWindow):
 
         self.work_panel = QFrame()
         self.work_panel.setObjectName("WorkPanel")
-        self.work_panel.setMinimumWidth(760)
+        self.work_panel.setMinimumWidth(640)
         work_layout = QVBoxLayout(self.work_panel)
         work_layout.setContentsMargins(22, 20, 22, 20)
         work_layout.setSpacing(16)
@@ -406,7 +474,7 @@ class MainWindow(QMainWindow):
         self.workspace_header.setSpacing(12)
         self.paper_icon_label = QLabel()
         self.paper_icon_label.setObjectName("PaperIcon")
-        self.paper_icon_label.setPixmap(self._make_icon("file", "#2563EB").pixmap(QSize(22, 22)))
+        self.paper_icon_label.setPixmap(self._make_icon("file", "#2563EB").pixmap(QSize(24, 24)))
         self.paper_icon_label.setFixedSize(32, 32)
         heading_box = QVBoxLayout()
         heading_box.setSpacing(5)
@@ -561,7 +629,7 @@ class MainWindow(QMainWindow):
 
         self.preview_panel = QFrame()
         self.preview_panel.setObjectName("PreviewCard")
-        self.preview_panel.setMinimumWidth(620)
+        self.preview_panel.setMinimumWidth(500)
         preview_layout = QVBoxLayout(self.preview_panel)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
@@ -616,13 +684,13 @@ class MainWindow(QMainWindow):
         self.workspace_splitter.addWidget(self.preview_panel)
         self.workspace_splitter.setStretchFactor(0, 6)
         self.workspace_splitter.setStretchFactor(1, 5)
-        self.workspace_splitter.setSizes([820, 720])
+        self.workspace_splitter.setSizes([760, 600])
 
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(content)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([336, 1240])
+        self.splitter.setSizes([318, 1260])
 
         self.setStatusBar(QStatusBar())
         self.statusBar().hide()
@@ -646,13 +714,21 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
 
         header = QHBoxLayout()
+        header.setSpacing(8)
         number_label = QLabel(number)
         number_label.setObjectName("StepNumber")
         number_label.setFixedSize(24, 24)
+        step_icon = QLabel()
+        step_icon.setObjectName("WorkflowIcon")
+        icon_kind = {"1": "document_search", "2": "book", "3": "document_edit"}.get(number, "file")
+        icon_color = {"1": "#2563EB", "2": "#7C3AED", "3": "#22C55E"}.get(number, "#2563EB")
+        step_icon.setPixmap(self._make_icon(icon_kind, icon_color).pixmap(QSize(22, 22)))
+        step_icon.setFixedSize(26, 26)
         title_label = QLabel(title)
         title_label.setObjectName("WorkflowTitle")
         title_label.setWordWrap(True)
         header.addWidget(number_label)
+        header.addWidget(step_icon)
         header.addWidget(title_label, 1)
 
         body_label = QLabel(body)
@@ -698,7 +774,7 @@ class MainWindow(QMainWindow):
                 max-height: 28px;
             }
             QLabel#TopBarTitle {
-                color: #111827;
+                color: #2563EB;
                 font-size: 15px;
                 font-weight: 700;
             }
@@ -750,7 +826,7 @@ class MainWindow(QMainWindow):
                 border-bottom: 1px solid #E2E8F0;
             }
             QLabel#AppTitle {
-                font-size: 18px;
+                font-size: 17px;
                 font-weight: 700;
                 color: #111827;
             }
@@ -819,8 +895,8 @@ class MainWindow(QMainWindow):
             QLabel#WorkflowArrow {
                 color: #64748B;
                 font-size: 28px;
-                min-width: 22px;
-                max-width: 22px;
+                min-width: 18px;
+                max-width: 18px;
             }
             QLabel#StepNumber {
                 min-width: 24px;
@@ -831,6 +907,15 @@ class MainWindow(QMainWindow):
                 background: #2563EB;
                 color: #FFFFFF;
                 font-weight: 700;
+                qproperty-alignment: AlignCenter;
+            }
+            QLabel#WorkflowIcon {
+                min-width: 26px;
+                max-width: 26px;
+                min-height: 26px;
+                max-height: 26px;
+                border-radius: 7px;
+                background: #F0F5FF;
                 qproperty-alignment: AlignCenter;
             }
             QLabel#WorkflowBadge, QLabel#StatusBadge {
@@ -909,8 +994,8 @@ class MainWindow(QMainWindow):
                 color: #334155;
             }
             QTreeWidget::item {
-                min-height: 34px;
-                padding: 8px 12px;
+                min-height: 32px;
+                padding: 7px 10px;
                 border-radius: 8px;
             }
             QTreeWidget::item:hover {
@@ -945,26 +1030,31 @@ class MainWindow(QMainWindow):
                 border-color: #E2E8F0;
             }
             QPushButton#SidebarToggle {
-                min-width: 44px;
-                max-width: 44px;
-                min-height: 44px;
-                max-height: 44px;
+                min-width: 38px;
+                max-width: 38px;
+                min-height: 38px;
+                max-height: 38px;
                 padding: 0;
-                border-radius: 10px;
-                border: 1px solid transparent;
+                border-radius: 8px;
+                border: 1px solid #E2E8F0;
                 color: #475569;
-                background: transparent;
+                background: #FFFFFF;
             }
             QPushButton#SidebarToggle:hover {
                 background: #F1F5F9;
             }
             QPushButton#SidebarAction {
                 min-height: 34px;
-                padding: 6px 8px;
+                padding: 6px 9px;
                 background: #F8FAFC;
                 color: #334155;
                 border: 1px solid #E2E8F0;
                 font-size: 12px;
+            }
+            QPushButton#SidebarAction:hover {
+                background: #F0F5FF;
+                border-color: #60A5FA;
+                color: #2563EB;
             }
             QPushButton#OutlineButton {
                 background: #2563EB;
@@ -991,12 +1081,12 @@ class MainWindow(QMainWindow):
             }
             QPushButton#SecondaryActionButton {
                 min-width: 140px;
-                background: #2563EB;
-                color: #FFFFFF;
+                background: #FFFFFF;
+                color: #2563EB;
                 border: 1px solid #2563EB;
             }
             QPushButton#SecondaryActionButton:hover {
-                background: #1D4ED8;
+                background: #F0F5FF;
                 border-color: #1D4ED8;
             }
             QLineEdit {
@@ -1037,10 +1127,14 @@ class MainWindow(QMainWindow):
             }
             QSplitter::handle {
                 background: #F7F9FC;
+                border: none;
                 width: 8px;
             }
+            QSplitter::handle:hover {
+                background: #EEF2F7;
+            }
             QPushButton#PreviewTabButton {
-                min-width: 118px;
+                min-width: 112px;
                 min-height: 42px;
                 border-radius: 8px;
                 border: 1px solid transparent;
@@ -1105,6 +1199,54 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
                 padding: 9px 12px;
             }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 8px;
+                margin: 2px;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: #CBD5E1;
+                min-height: 42px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #94A3B8;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+                border: none;
+                background: transparent;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 8px;
+                margin: 2px;
+                border: none;
+            }
+            QScrollBar::handle:horizontal {
+                background: #CBD5E1;
+                min-width: 42px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #94A3B8;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {
+                width: 0px;
+                border: none;
+                background: transparent;
+            }
+            QScrollBar::add-page:horizontal,
+            QScrollBar::sub-page:horizontal {
+                background: transparent;
+            }
             """
         )
 
@@ -1157,6 +1299,7 @@ class MainWindow(QMainWindow):
             if sizes and sizes[0] > 0:
                 self.last_sidebar_width = sizes[0]
             self._remove_sidebar_toggle()
+            self.sidebar_toggle_button.setIcon(self._make_icon("menu", "#475569"))
             self.sidebar_rail_layout.insertWidget(0, self.sidebar_toggle_button)
             self.sidebar_rail.show()
             self.sidebar.hide()
@@ -1164,11 +1307,12 @@ class MainWindow(QMainWindow):
             self.splitter.setSizes([0, max(sum(sizes), 900)])
         else:
             self._remove_sidebar_toggle()
+            self.sidebar_toggle_button.setIcon(self._make_icon("collapse", "#475569"))
             self.sidebar_header.addWidget(self.sidebar_toggle_button)
             self.sidebar.show()
             self.sidebar_rail.hide()
             self.sidebar_visible = True
-            self.splitter.setSizes([max(self.last_sidebar_width, 260), 900])
+            self.splitter.setSizes([max(self.last_sidebar_width, 300), 900])
 
     def _remove_sidebar_toggle(self) -> None:
         self.sidebar_header.removeWidget(self.sidebar_toggle_button)
@@ -1372,14 +1516,16 @@ class MainWindow(QMainWindow):
             total = len(doc)
             for index, page in enumerate(doc, start=1):
                 image_path = cache_dir / f"page_{index:03d}.png"
+                display_width = max(360, min(900, self.detail.viewport().width() - 70))
                 if not image_path.exists() or image_path.stat().st_mtime < pdf_mtime:
-                    pix = page.get_pixmap(matrix=fitz.Matrix(1.45, 1.45), alpha=False)
+                    scale = max(0.7, display_width / max(float(page.rect.width), 1.0))
+                    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
                     pix.save(str(image_path))
                 image_url = QUrl.fromLocalFile(str(image_path)).toString()
                 pages.append(
                     "<div class='pdf-page'>"
                     f"<p class='muted'>第 {index} / {total} 页</p>"
-                    f"<img src='{image_url}' alt='PDF page {index}' />"
+                    f"<img src='{image_url}' width='{display_width}' alt='PDF page {index}' />"
                     "</div>"
                 )
                 if index % 2 == 0:
@@ -1404,6 +1550,13 @@ class MainWindow(QMainWindow):
             # The output folder should always have a starter collection.
             self.library.create_folder("默认文件夹")
             folders = self.library.list_folders()
+
+        resource_item = QTreeWidgetItem(["资源库"])
+        resource_item.setIcon(0, self._make_icon("folder", "#2563EB"))
+        resource_item.setData(0, Qt.UserRole, {"kind": "resource_root", "path": self.library.root})
+        self.library_tree.addTopLevelItem(resource_item)
+        resource_item.setExpanded(True)
+
         for folder in folders:
             papers = self.library.list_papers(folder)
             if query:
@@ -1419,7 +1572,7 @@ class MainWindow(QMainWindow):
             folder_item = QTreeWidgetItem([folder.name])
             folder_item.setIcon(0, self._make_icon("folder", "#F59E0B"))
             folder_item.setData(0, Qt.UserRole, {"kind": "collection", "folder": folder, "path": folder.path})
-            self.library_tree.addTopLevelItem(folder_item)
+            resource_item.addChild(folder_item)
             folder_item.setExpanded(True)
             if preferred_path is not None and folder.path.resolve() == preferred_path.resolve():
                 preferred_item = folder_item
@@ -1437,6 +1590,11 @@ class MainWindow(QMainWindow):
                 file_preferred = self._add_file_children(paper_item, paper, folder, preferred_path, query)
                 if file_preferred is not None:
                     preferred_item = file_preferred
+
+        recycle_item = QTreeWidgetItem(["回收站"])
+        recycle_item.setIcon(0, self._make_icon("trash", "#64748B"))
+        recycle_item.setData(0, Qt.UserRole, {"kind": "recycle", "path": self.library.root})
+        self.library_tree.addTopLevelItem(recycle_item)
         if preferred_item is not None:
             self.library_tree.setCurrentItem(preferred_item)
             preferred_item.setExpanded(True)
@@ -1444,8 +1602,10 @@ class MainWindow(QMainWindow):
             while parent is not None:
                 parent.setExpanded(True)
                 parent = parent.parent()
+        elif resource_item.childCount():
+            self.library_tree.setCurrentItem(resource_item.child(0))
         elif self.library_tree.topLevelItemCount():
-            self.library_tree.setCurrentItem(self.library_tree.topLevelItem(0))
+            self.library_tree.setCurrentItem(resource_item)
 
     def _add_file_children(
         self,
@@ -1469,7 +1629,9 @@ class MainWindow(QMainWindow):
                 continue
             kind = "dir" if child.is_dir() else "file"
             item = QTreeWidgetItem([self._display_file_name(child)])
-            item.setIcon(0, self._make_icon("file", "#64748B"))
+            icon_name = "pdf" if child.suffix.lower() == ".pdf" else "md"
+            icon_color = "#EF4444" if child.suffix.lower() == ".pdf" else "#64748B"
+            item.setIcon(0, self._make_icon(icon_name, icon_color))
             item.setData(0, Qt.UserRole, {"kind": kind, "folder": folder, "paper": paper, "path": child})
             parent_item.addChild(item)
             if preferred_path is not None and child.resolve() == preferred_path.resolve():
@@ -1548,6 +1710,7 @@ class MainWindow(QMainWindow):
     def _update_work_panel_for_paper(self, paper: PaperRecord | None) -> None:
         self.current_paper = paper
         if paper is None:
+            self.paper_icon_label.setPixmap(self._make_icon("file", "#2563EB").pixmap(QSize(24, 24)))
             self.paper_title_label.setText("选择或上传一篇论文")
             self.folder_label.setText(
                 f"当前文件夹：{self.current_folder.name}" if self.current_folder else "请选择或新建一个文件夹"
@@ -1556,8 +1719,10 @@ class MainWindow(QMainWindow):
             self._set_selected_pdf_label(self.current_pdf)
             self._set_workflow_badges("待处理", "待处理", "待处理")
             return
+        self.paper_icon_label.setPixmap(self._make_icon("file", "#2563EB").pixmap(QSize(24, 24)))
         self.paper_title_label.setText(paper.name)
-        self.folder_label.setText(f"位置：{paper.path}")
+        created_at = datetime.fromtimestamp(paper.path.stat().st_ctime).strftime("%Y-%m-%d %H:%M")
+        self.folder_label.setText(f"位置：{paper.path}    |    创建于 {created_at}")
         self._set_badge(self.project_status_badge, "项目健康")
         self.current_pdf = paper.original_pdf
         self._set_selected_pdf_label(paper.original_pdf)
@@ -1582,7 +1747,20 @@ class MainWindow(QMainWindow):
             self.folder_label.setText(f"当前文件夹：{folder.name}")
 
         kind = data.get("kind")
-        if kind == "collection":
+        if kind == "resource_root":
+            self._set_preview_html(
+                "<h2>资源库</h2>"
+                "<p class='muted'>选择一个文件夹或论文项目后，右侧会显示原论文、译文或 Summary 预览。</p>"
+                f"<p class='path'>路径：{html.escape(str(self.library.root))}</p>",
+                self.library.root,
+            )
+        elif kind == "recycle":
+            self._set_preview_html(
+                "<h2>回收站</h2>"
+                "<p class='muted'>删除操作会优先移动到系统回收站。</p>",
+                self.library.root,
+            )
+        elif kind == "collection":
             self.current_pdf = None
             self._update_work_panel_for_paper(None)
             self._set_preview_html(
@@ -1616,7 +1794,7 @@ class MainWindow(QMainWindow):
     def on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         data = item.data(0, Qt.UserRole) or {}
         path = data.get("path")
-        if data.get("kind") in {"collection", "paper", "dir"}:
+        if data.get("kind") in {"resource_root", "collection", "paper", "dir"}:
             item.setExpanded(not item.isExpanded())
             return
         if path:
@@ -1632,6 +1810,9 @@ class MainWindow(QMainWindow):
     def rename_folder(self) -> None:
         data = self._selected_data()
         if not data:
+            return
+        if data.get("kind") in {"resource_root", "recycle"}:
+            QMessageBox.warning(self, "不能重命名", "请选择具体文件夹、论文或文件。")
             return
         old_path = Path(data["path"])
         kind = data.get("kind")
@@ -1680,6 +1861,9 @@ class MainWindow(QMainWindow):
     def delete_folder(self) -> None:
         data = self._selected_data()
         if not data:
+            return
+        if data.get("kind") in {"resource_root", "recycle"}:
+            QMessageBox.warning(self, "不能删除", "请选择具体文件夹、论文或文件。")
             return
         path = Path(data["path"])
         kind = data.get("kind")
