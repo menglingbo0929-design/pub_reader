@@ -158,35 +158,28 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
         self.setCentralWidget(root)
 
-        self.nav_rail = QFrame()
-        self.nav_rail.setObjectName("NavRail")
-        rail_layout = QVBoxLayout(self.nav_rail)
-        rail_layout.setContentsMargins(10, 14, 10, 14)
-        rail_layout.setSpacing(8)
-
         self.sidebar_toggle_button = QPushButton()
-        self.sidebar_toggle_button.setObjectName("RailButton")
+        self.sidebar_toggle_button.setObjectName("SidebarToggle")
         self.sidebar_toggle_button.setText("☰")
         self.sidebar_toggle_button.setToolTip("展开/收起目录")
         self.sidebar_toggle_button.setMinimumSize(44, 44)
         self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
-        rail_layout.addWidget(self.sidebar_toggle_button)
-        rail_layout.addStretch()
 
         self.splitter = QSplitter(Qt.Horizontal)
-        root_layout.addWidget(self.nav_rail)
         root_layout.addWidget(self.splitter, 1)
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
         sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(18, 18, 18, 18)
-        sidebar_layout.setSpacing(14)
+        sidebar_layout.setContentsMargins(16, 18, 16, 16)
+        sidebar_layout.setSpacing(16)
 
-        sidebar_header = QHBoxLayout()
+        self.sidebar_header = QHBoxLayout()
+        self.sidebar_header.setSpacing(10)
         app_title = QLabel("Pub Reader")
         app_title.setObjectName("AppTitle")
-        sidebar_header.addWidget(app_title, 1)
+        self.sidebar_header.addWidget(app_title, 1)
+        self.sidebar_header.addWidget(self.sidebar_toggle_button)
 
         subtitle = QLabel("英文论文中文阅读工作台")
         subtitle.setObjectName("Subtitle")
@@ -212,7 +205,7 @@ class MainWindow(QMainWindow):
         folder_buttons.addWidget(rename_folder)
         folder_buttons.addWidget(delete_folder)
 
-        sidebar_layout.addLayout(sidebar_header)
+        sidebar_layout.addLayout(self.sidebar_header)
         sidebar_layout.addWidget(subtitle)
         folder_label = QLabel("文件夹")
         folder_label.setObjectName("SectionLabel")
@@ -226,14 +219,8 @@ class MainWindow(QMainWindow):
         content_layout.setContentsMargins(34, 28, 34, 28)
         content_layout.setSpacing(18)
 
-        top_panel = QFrame()
-        top_panel.setObjectName("TopPanel")
-        top_panel_layout = QVBoxLayout(top_panel)
-        top_panel_layout.setContentsMargins(26, 24, 26, 22)
-        top_panel_layout.setSpacing(16)
-
-        header = QHBoxLayout()
-        header.setSpacing(14)
+        self.workspace_header = QHBoxLayout()
+        self.workspace_header.setSpacing(14)
         heading_box = QVBoxLayout()
         heading_box.setSpacing(6)
         heading = QLabel("论文处理")
@@ -245,46 +232,61 @@ class MainWindow(QMainWindow):
 
         self.upload_button = QPushButton("选择 PDF")
         self.upload_button.setObjectName("OutlineButton")
-        self.upload_button.setMinimumHeight(42)
+        self.upload_button.setMinimumHeight(44)
         self.upload_button.clicked.connect(self.choose_pdf)
         self.translate_button = QPushButton(self.translate_text)
         self.translate_button.setObjectName("PrimaryButton")
-        self.translate_button.setMinimumHeight(42)
+        self.translate_button.setMinimumHeight(44)
         self.translate_button.clicked.connect(lambda: self.generate_outputs("translation"))
         self.summary_button = QPushButton(self.summary_text)
         self.summary_button.setObjectName("SecondaryActionButton")
-        self.summary_button.setMinimumHeight(42)
+        self.summary_button.setMinimumHeight(44)
         self.summary_button.clicked.connect(lambda: self.generate_outputs("summary"))
 
-        header.addLayout(heading_box, 1)
-        header.addWidget(self.upload_button)
-        header.addWidget(self.translate_button)
-        header.addWidget(self.summary_button)
+        self.workspace_header.addLayout(heading_box, 1)
+        self.workspace_header.addWidget(self.upload_button)
+        self.workspace_header.addWidget(self.translate_button)
+        self.workspace_header.addWidget(self.summary_button)
 
         self.selected_pdf_label = QLabel("尚未选择 PDF")
-        self.selected_pdf_label.setObjectName("SelectedFile")
-
-        selected_file_caption = QLabel("当前论文文件")
-        selected_file_caption.setObjectName("FieldLabel")
+        self.selected_pdf_label.setObjectName("FileCard")
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setTextVisible(True)
+        self.progress.setTextVisible(False)
 
-        top_panel_layout.addLayout(header)
-        top_panel_layout.addWidget(selected_file_caption)
-        top_panel_layout.addWidget(self.selected_pdf_label)
-        top_panel_layout.addWidget(self.progress)
+        progress_card = QFrame()
+        progress_card.setObjectName("ProgressCard")
+        progress_layout = QHBoxLayout(progress_card)
+        progress_layout.setContentsMargins(18, 14, 18, 14)
+        progress_layout.setSpacing(14)
+        self.progress_status_label = QLabel("就绪")
+        self.progress_status_label.setObjectName("ProgressStatus")
+        progress_layout.addWidget(self.progress, 1)
+        progress_layout.addWidget(self.progress_status_label)
 
         preview_shell = QFrame()
-        preview_shell.setObjectName("PreviewShell")
+        preview_shell.setObjectName("PreviewCard")
         preview_layout = QVBoxLayout(preview_shell)
         preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_layout.setSpacing(12)
+        preview_layout.setSpacing(0)
 
-        preview_title = QLabel("文档预览")
-        preview_title.setObjectName("SectionTitle")
+        preview_toolbar = QFrame()
+        preview_toolbar.setObjectName("PreviewToolbar")
+        preview_toolbar_layout = QHBoxLayout(preview_toolbar)
+        preview_toolbar_layout.setContentsMargins(18, 0, 18, 0)
+        preview_toolbar_layout.setSpacing(22)
+        active_tab = QLabel("原文 / PDF")
+        active_tab.setObjectName("ActiveTab")
+        translated_tab = QLabel("译文 / Markdown")
+        translated_tab.setObjectName("PreviewTab")
+        summary_tab = QLabel("Summary")
+        summary_tab.setObjectName("PreviewTab")
+        preview_toolbar_layout.addWidget(active_tab)
+        preview_toolbar_layout.addWidget(translated_tab)
+        preview_toolbar_layout.addWidget(summary_tab)
+        preview_toolbar_layout.addStretch(1)
 
         self.detail = QTextBrowser()
         self.detail.setObjectName("PreviewPanel")
@@ -296,15 +298,17 @@ class MainWindow(QMainWindow):
             "<p>选择左侧论文或导入 PDF 后，PDF、译文 Markdown 和 Summary 会在这里直接预览。</p>"
         )
 
-        preview_layout.addWidget(preview_title)
+        preview_layout.addWidget(preview_toolbar)
         preview_layout.addWidget(self.detail, 1)
 
-        content_layout.addWidget(top_panel)
+        content_layout.addLayout(self.workspace_header)
+        content_layout.addWidget(self.selected_pdf_label)
+        content_layout.addWidget(progress_card)
         content_layout.addWidget(preview_shell, 1)
 
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(content)
-        self.splitter.setSizes([300, 820])
+        self.splitter.setSizes([280, 980])
 
         self.setStatusBar(QStatusBar())
 
@@ -321,28 +325,30 @@ class MainWindow(QMainWindow):
                 background: transparent;
             }
             QFrame#AppShell {
-                background: #F5F7FA;
-            }
-            QFrame#NavRail {
-                min-width: 64px;
-                max-width: 64px;
-                background: #F9FAFB;
-                border-right: 1px solid #E7EAF0;
+                background: #FFFFFF;
             }
             QFrame#Sidebar {
-                background: #FFFFFF;
-                border-right: 1px solid #E7EAF0;
+                background: #FAFAFB;
+                border-right: 1px solid #E5E7EB;
             }
             QFrame#Content {
-                background: #F5F7FA;
+                background: #FBFCFD;
             }
-            QFrame#TopPanel {
+            QFrame#ProgressCard {
                 background: #FFFFFF;
                 border: 1px solid #E2E8F0;
-                border-radius: 16px;
+                border-radius: 12px;
             }
-            QFrame#PreviewShell {
-                background: transparent;
+            QFrame#PreviewCard {
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 12px;
+            }
+            QFrame#PreviewToolbar {
+                min-height: 58px;
+                max-height: 58px;
+                background: #FFFFFF;
+                border-bottom: 1px solid #E2E8F0;
             }
             QLabel#AppTitle {
                 font-size: 24px;
@@ -350,7 +356,7 @@ class MainWindow(QMainWindow):
                 color: #0F172A;
             }
             QLabel#PageTitle {
-                font-size: 30px;
+                font-size: 29px;
                 font-weight: 700;
                 color: #0F172A;
             }
@@ -358,6 +364,19 @@ class MainWindow(QMainWindow):
                 font-size: 16px;
                 font-weight: 700;
                 color: #0F172A;
+            }
+            QLabel#ActiveTab {
+                min-height: 58px;
+                color: #0F766E;
+                font-size: 14px;
+                font-weight: 700;
+                border-bottom: 3px solid #0F766E;
+            }
+            QLabel#PreviewTab {
+                min-height: 58px;
+                color: #475569;
+                font-size: 14px;
+                font-weight: 600;
             }
             QLabel#Subtitle, QLabel#HelperText {
                 color: #64748B;
@@ -374,37 +393,38 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
                 letter-spacing: 0px;
             }
-            QLabel#SelectedFile {
-                padding: 12px 14px;
-                background: #F8FAFC;
+            QLabel#FileCard {
+                padding: 18px 22px;
+                background: #FFFFFF;
                 border: 1px solid #E2E8F0;
-                border-radius: 10px;
+                border-radius: 12px;
                 color: #334155;
+                font-size: 15px;
             }
             QTextBrowser#PreviewPanel {
                 padding: 26px;
                 background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 16px;
+                border: none;
+                border-radius: 0px;
                 selection-background-color: #B9E6DE;
             }
             QTextBrowser#PreviewPanel h2 {
                 color: #0F172A;
             }
             QTreeWidget {
-                background: #FFFFFF;
-                border: 1px solid #EEF2F7;
-                border-radius: 14px;
-                padding: 10px;
+                background: #FAFAFB;
+                border: none;
+                border-radius: 0px;
+                padding: 2px;
             }
             QTreeWidget::item {
                 min-height: 38px;
                 padding: 8px 12px;
-                border-radius: 10px;
+                border-radius: 8px;
             }
             QTreeWidget::item:selected {
-                background: #E6F4F1;
-                color: #0F766E;
+                background: #EFF1F4;
+                color: #111827;
             }
             QTreeWidget::branch {
                 image: none;
@@ -429,21 +449,19 @@ class MainWindow(QMainWindow):
                 color: #9CA3AF;
                 background: #F3F4F6;
             }
-            QPushButton#RailButton {
+            QPushButton#SidebarToggle {
                 min-width: 44px;
                 max-width: 44px;
                 min-height: 44px;
                 max-height: 44px;
                 padding: 0;
-                border-radius: 12px;
+                border-radius: 10px;
                 border: 1px solid transparent;
-            }
-            QPushButton#RailButton {
                 color: #0F172A;
                 background: transparent;
                 font-size: 22px;
             }
-            QPushButton#RailButton:hover {
+            QPushButton#SidebarToggle:hover {
                 background: #EEF2F7;
             }
             QPushButton#SidebarAction {
@@ -456,17 +474,17 @@ class MainWindow(QMainWindow):
                 border: 1px solid #CBD5E1;
             }
             QPushButton#PrimaryButton {
-                background: #0F766E;
+                background: #008C83;
                 color: #FFFFFF;
-                border: 1px solid #0F766E;
+                border: 1px solid #008C83;
             }
             QPushButton#PrimaryButton:hover {
-                background: #115E59;
+                background: #00766F;
             }
             QPushButton#SecondaryActionButton {
-                background: #0F172A;
+                background: #111827;
                 color: #FFFFFF;
-                border: 1px solid #0F172A;
+                border: 1px solid #111827;
             }
             QPushButton#SecondaryActionButton:hover {
                 background: #1E293B;
@@ -488,7 +506,7 @@ class MainWindow(QMainWindow):
             }
             QProgressBar::chunk {
                 border-radius: 5px;
-                background: #0F766E;
+                background: #008C83;
             }
             QSplitter::handle {
                 background: #E7EAF0;
@@ -545,11 +563,15 @@ class MainWindow(QMainWindow):
         if self.sidebar_visible:
             if sizes and sizes[0] > 0:
                 self.last_sidebar_width = sizes[0]
+            self.sidebar_header.removeWidget(self.sidebar_toggle_button)
+            self.workspace_header.insertWidget(0, self.sidebar_toggle_button)
             self.sidebar.hide()
             self.sidebar_visible = False
             self.sidebar_toggle_button.setText("☰")
             self.splitter.setSizes([0, max(sum(sizes), 900)])
         else:
+            self.workspace_header.removeWidget(self.sidebar_toggle_button)
+            self.sidebar_header.addWidget(self.sidebar_toggle_button)
             self.sidebar.show()
             self.sidebar_visible = True
             self.sidebar_toggle_button.setText("☰")
@@ -716,6 +738,12 @@ class MainWindow(QMainWindow):
         except ValueError:
             return False
 
+    def _set_selected_pdf_label(self, path: Path | None) -> None:
+        if path is None:
+            self.selected_pdf_label.setText("尚未选择 PDF")
+            return
+        self.selected_pdf_label.setText(f"PDF 论文\n{path.name}\n{path}")
+
     def on_tree_selection_changed(
         self,
         current: QTreeWidgetItem | None,
@@ -742,13 +770,13 @@ class MainWindow(QMainWindow):
             paper = data["paper"]
             if paper.original_pdf:
                 self.current_pdf = paper.original_pdf
-                self.selected_pdf_label.setText(str(self.current_pdf))
+                self._set_selected_pdf_label(self.current_pdf)
             self.show_paper_detail(paper)
         elif kind in {"file", "dir"}:
             path = Path(data["path"])
             if path.suffix.lower() == ".pdf":
                 self.current_pdf = path
-                self.selected_pdf_label.setText(str(self.current_pdf))
+                self._set_selected_pdf_label(self.current_pdf)
             self.show_path_detail(path)
 
     def on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
@@ -827,7 +855,7 @@ class MainWindow(QMainWindow):
             self.current_folder = data.get("folder")
             if deleted_current_pdf:
                 self.current_pdf = None
-                self.selected_pdf_label.setText("尚未选择 PDF")
+                self._set_selected_pdf_label(None)
             self.refresh_folders(preferred_path=preferred_path)
         except OSError as exc:
             QMessageBox.critical(self, "删除失败", str(exc))
@@ -854,12 +882,13 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() == QFileDialog.Accepted and dialog.selectedFiles():
             self.current_pdf = Path(dialog.selectedFiles()[0])
-            self.selected_pdf_label.setText(str(self.current_pdf))
+            self._set_selected_pdf_label(self.current_pdf)
 
     def _enter_processing_state(self, action: str) -> None:
         self.active_action = action
         self.upload_button.setEnabled(False)
         self.progress.setValue(0)
+        self.progress_status_label.setText("处理中...")
         if action == "translation":
             self.translate_button.setText("取消译文")
             self.translate_button.setEnabled(True)
@@ -878,6 +907,7 @@ class MainWindow(QMainWindow):
         self.translate_button.setEnabled(True)
         self.summary_button.setEnabled(True)
         self.progress.setValue(0)
+        self.progress_status_label.setText("就绪")
 
     def cancel_active_task(self) -> None:
         if not self.active_task:
@@ -920,6 +950,7 @@ class MainWindow(QMainWindow):
 
     def on_progress(self, message: str, value: int) -> None:
         self.progress.setValue(value)
+        self.progress_status_label.setText(f"{value}%")
         self.statusBar().showMessage(message)
 
     def on_finished(self, outputs: PaperOutputs) -> None:
