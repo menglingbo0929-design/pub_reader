@@ -579,6 +579,11 @@ class MainWindow(QMainWindow):
         self.preview_tab_pdf = QPushButton("原论文预览")
         self.preview_tab_translation = QPushButton("中文译文.md")
         self.preview_tab_summary = QPushButton("Summary.md")
+        self.preview_tabs = [
+            self.preview_tab_pdf,
+            self.preview_tab_translation,
+            self.preview_tab_summary,
+        ]
         for tab, name in [
             (self.preview_tab_pdf, "pdf"),
             (self.preview_tab_translation, "translation"),
@@ -633,6 +638,7 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self.statusBar().hide()
+        self._apply_sidebar_width_mode()
         self._sync_preview_tabs()
         self._append_log("等待选择论文或上传 PDF。")
 
@@ -649,6 +655,10 @@ class MainWindow(QMainWindow):
         card.setObjectName("WorkflowCard")
         card.setMinimumWidth(200)
         card.setMinimumHeight(128)
+        if not hasattr(self, "workflow_cards"):
+            self.workflow_cards = []
+            self.workflow_title_labels = []
+        self.workflow_cards.append(card)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 14, 14, 12)
         layout.setSpacing(8)
@@ -667,6 +677,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel(title)
         title_label.setObjectName("WorkflowTitle")
         title_label.setWordWrap(False)
+        self.workflow_title_labels.append(title_label)
         header.addWidget(number_label)
         header.addWidget(step_icon)
         header.addWidget(title_label, 1)
@@ -1245,6 +1256,7 @@ class MainWindow(QMainWindow):
             self.sidebar.hide()
             self.sidebar_visible = False
             self.splitter.setSizes([0, max(sum(sizes), 900)])
+            self._apply_sidebar_width_mode()
         else:
             self._remove_sidebar_toggle()
             self.sidebar_toggle_button.setIcon(self._make_icon("collapse", "#475569"))
@@ -1253,12 +1265,38 @@ class MainWindow(QMainWindow):
             self.sidebar_rail.hide()
             self.sidebar_visible = True
             self.splitter.setSizes([max(self.last_sidebar_width, 300), 900])
+            self._apply_sidebar_width_mode()
 
     def _remove_sidebar_toggle(self) -> None:
         self.sidebar_header.removeWidget(self.sidebar_toggle_button)
         self.workspace_header.removeWidget(self.sidebar_toggle_button)
         self.preview_header_layout.removeWidget(self.sidebar_toggle_button)
         self.sidebar_rail_layout.removeWidget(self.sidebar_toggle_button)
+
+    def _apply_sidebar_width_mode(self) -> None:
+        """Use a compact layout only while the full project sidebar is visible."""
+        sidebar_open = self.sidebar_visible
+        tab_width = 96 if sidebar_open else 112
+        header_margins = (12, 14, 12, 10) if sidebar_open else (18, 14, 18, 10)
+        header_spacing = 4 if sidebar_open else 8
+        detail_size = 34 if sidebar_open else 38
+        card_min_width = 0 if sidebar_open else 200
+        card_min_height = 150 if sidebar_open else 128
+
+        self.preview_header_layout.setContentsMargins(*header_margins)
+        self.preview_header_layout.setSpacing(header_spacing)
+        for tab in self.preview_tabs:
+            tab.setMinimumWidth(tab_width)
+            tab.setMaximumWidth(124 if sidebar_open else 16777215)
+        self.detail_button.setFixedSize(detail_size, detail_size)
+
+        for card in getattr(self, "workflow_cards", []):
+            card.setMinimumWidth(card_min_width)
+            card.setMinimumHeight(card_min_height)
+        for title in getattr(self, "workflow_title_labels", []):
+            title.setWordWrap(sidebar_open)
+
+        self.workspace_splitter.setSizes([820, 520] if sidebar_open else [790, 570])
 
     def _sync_preview_tabs(self) -> None:
         buttons = {
