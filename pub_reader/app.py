@@ -5,10 +5,11 @@ import re
 import shutil
 import sys
 import threading
+import html
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QAction, QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QStyle,
+    QTextBrowser,
     QToolBar,
     QTreeWidget,
     QTreeWidgetItem,
@@ -140,6 +142,8 @@ class MainWindow(QMainWindow):
         self.active_action: str | None = None
         self.translate_text = "生成译文"
         self.summary_text = "生成 Summary"
+        self.sidebar_visible = True
+        self.last_sidebar_width = 300
 
         self.setWindowTitle("Pub Reader")
         self.setMinimumSize(1120, 720)
@@ -156,12 +160,12 @@ class MainWindow(QMainWindow):
         refresh_action.triggered.connect(self.refresh_folders)
         toolbar.addAction(refresh_action)
 
-        splitter = QSplitter(Qt.Horizontal)
-        self.setCentralWidget(splitter)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.setCentralWidget(self.splitter)
 
-        sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
-        sidebar_layout = QVBoxLayout(sidebar)
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("Sidebar")
+        sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(16, 16, 16, 16)
         sidebar_layout.setSpacing(12)
 
@@ -201,6 +205,12 @@ class MainWindow(QMainWindow):
         content_layout.setSpacing(16)
 
         header = QHBoxLayout()
+        self.sidebar_toggle_button = QPushButton("目录")
+        self.sidebar_toggle_button.setObjectName("SidebarToggleButton")
+        self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarShadeButton))
+        self.sidebar_toggle_button.setMinimumHeight(44)
+        self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
+
         heading_box = QVBoxLayout()
         heading = QLabel("论文处理")
         heading.setObjectName("PageTitle")
@@ -224,6 +234,7 @@ class MainWindow(QMainWindow):
         self.summary_button.setMinimumHeight(44)
         self.summary_button.clicked.connect(lambda: self.generate_outputs("summary"))
 
+        header.addWidget(self.sidebar_toggle_button)
         header.addLayout(heading_box, 1)
         header.addWidget(self.upload_button)
         header.addWidget(self.translate_button)
@@ -237,20 +248,28 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
 
-        self.detail = QLabel("导入论文后，这里会显示原文 PDF、中文译文和 Summary 的入口。")
-        self.detail.setObjectName("DetailPanel")
-        self.detail.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.detail.setWordWrap(True)
-        self.detail.setOpenExternalLinks(True)
+        preview_title = QLabel("阅读预览")
+        preview_title.setObjectName("SectionTitle")
+
+        self.detail = QTextBrowser()
+        self.detail.setObjectName("PreviewPanel")
+        self.detail.setOpenExternalLinks(False)
+        self.detail.setOpenLinks(False)
+        self.detail.anchorClicked.connect(self.on_preview_link_clicked)
+        self._set_preview_html(
+            "<h2>等待论文</h2>"
+            "<p>选择左侧论文或导入 PDF 后，PDF、译文 Markdown 和 Summary 会在这里直接预览。</p>"
+        )
 
         content_layout.addLayout(header)
         content_layout.addWidget(self.selected_pdf_label)
         content_layout.addWidget(self.progress)
+        content_layout.addWidget(preview_title)
         content_layout.addWidget(self.detail, 1)
 
-        splitter.addWidget(sidebar)
-        splitter.addWidget(content)
-        splitter.setSizes([300, 820])
+        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(content)
+        self.splitter.setSizes([300, 820])
 
         self.setStatusBar(QStatusBar())
 
@@ -260,48 +279,70 @@ class MainWindow(QMainWindow):
             QWidget {
                 font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
                 font-size: 14px;
-                color: #134E4A;
-                background: #F8FEFC;
+                color: #113F3B;
+                background: #F6FBF9;
+            }
+            QToolBar {
+                spacing: 8px;
+                padding: 6px 10px;
+                background: #F9FFFD;
+                border-bottom: 1px solid #DCEDEA;
+            }
+            QToolBar QToolButton {
+                min-height: 32px;
+                padding: 4px 10px;
+                border-radius: 7px;
+                color: #14524D;
             }
             QFrame#Sidebar {
-                background: #ECFDF5;
-                border-right: 1px solid #99F6E4;
+                background: #EAF7F3;
+                border-right: 1px solid #B7E7DF;
             }
             QFrame#Content {
-                background: #F8FEFC;
+                background: #F6FBF9;
             }
             QLabel#AppTitle {
                 font-size: 28px;
                 font-weight: 700;
+                color: #0E4F4A;
             }
             QLabel#PageTitle {
-                font-size: 24px;
+                font-size: 25px;
                 font-weight: 700;
+                color: #0F4C47;
+            }
+            QLabel#SectionTitle {
+                font-size: 15px;
+                font-weight: 700;
+                color: #315C58;
             }
             QLabel#Subtitle, QLabel#HelperText {
-                color: #476B67;
+                color: #52716D;
             }
             QLabel#SelectedFile {
-                padding: 10px 12px;
+                padding: 11px 13px;
                 background: #FFFFFF;
-                border: 1px solid #CFEDEA;
+                border: 1px solid #CBE5E0;
                 border-radius: 8px;
             }
-            QLabel#DetailPanel {
-                padding: 18px;
+            QTextBrowser#PreviewPanel {
+                padding: 20px;
                 background: #FFFFFF;
-                border: 1px solid #CFEDEA;
+                border: 1px solid #CBE5E0;
                 border-radius: 8px;
-                line-height: 1.6;
+                selection-background-color: #BDEFE7;
+            }
+            QTextBrowser#PreviewPanel h2 {
+                color: #0E4F4A;
             }
             QTreeWidget {
                 background: #FFFFFF;
-                border: 1px solid #CFEDEA;
+                border: 1px solid #CBE5E0;
                 border-radius: 8px;
                 padding: 6px;
             }
             QTreeWidget::item {
-                min-height: 36px;
+                min-height: 38px;
                 padding: 8px;
                 border-radius: 6px;
             }
@@ -317,7 +358,7 @@ class MainWindow(QMainWindow):
                 min-height: 36px;
                 padding: 8px 14px;
                 border-radius: 8px;
-                border: 1px solid #99F6E4;
+                border: 1px solid #91DCD2;
                 background: #FFFFFF;
                 color: #134E4A;
                 font-weight: 600;
@@ -331,6 +372,11 @@ class MainWindow(QMainWindow):
             QPushButton:disabled {
                 color: #8BA4A0;
                 background: #EEF6F5;
+            }
+            QPushButton#SidebarToggleButton {
+                min-width: 76px;
+                background: #FFFFFF;
+                border: 1px solid #CBE5E0;
             }
             QPushButton#PrimaryButton {
                 background: #0D9488;
@@ -349,14 +395,14 @@ class MainWindow(QMainWindow):
                 background: #164E63;
             }
             QLineEdit {
-                border: 1px solid #99F6E4;
+                border: 1px solid #91DCD2;
                 border-radius: 8px;
                 padding: 8px 12px;
                 background: #FFFFFF;
             }
             QProgressBar {
-                min-height: 12px;
-                border: 1px solid #CFEDEA;
+                min-height: 14px;
+                border: 1px solid #CBE5E0;
                 border-radius: 6px;
                 background: #FFFFFF;
                 text-align: center;
@@ -367,6 +413,146 @@ class MainWindow(QMainWindow):
             }
             """
         )
+
+    def _set_preview_html(self, body: str, base_path: Path | None = None) -> None:
+        """Render a small HTML view inside the main reading panel."""
+        base_path = base_path or self.library.root
+        self.detail.setSearchPaths([str(base_path)])
+        self.detail.document().setBaseUrl(QUrl.fromLocalFile(str(base_path) + os.sep))
+        self.detail.setHtml(
+            """
+            <style>
+                body {
+                    font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+                    color: #113F3B;
+                    line-height: 1.65;
+                    background: #FFFFFF;
+                }
+                h1, h2, h3 { color: #0E4F4A; }
+                a { color: #0F766E; text-decoration: none; font-weight: 600; }
+                .muted { color: #607C78; }
+                .file-card {
+                    margin: 14px 0;
+                    padding: 14px 16px;
+                    border: 1px solid #D5E9E5;
+                    border-radius: 8px;
+                    background: #F9FFFD;
+                }
+                .path { color: #315C58; font-size: 13px; }
+                .pdf-page {
+                    margin: 18px 0 28px 0;
+                    padding: 14px;
+                    border: 1px solid #D5E9E5;
+                    border-radius: 8px;
+                    background: #FDFEFE;
+                }
+                .pdf-page img {
+                    width: 100%;
+                    max-width: 980px;
+                    border: 1px solid #D9E6E3;
+                    background: #FFFFFF;
+                }
+            </style>
+            """
+            + body
+        )
+
+    def toggle_sidebar(self) -> None:
+        sizes = self.splitter.sizes()
+        if self.sidebar_visible:
+            if sizes and sizes[0] > 0:
+                self.last_sidebar_width = sizes[0]
+            self.sidebar.hide()
+            self.sidebar_visible = False
+            self.sidebar_toggle_button.setText("展开目录")
+            self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarUnshadeButton))
+            self.splitter.setSizes([0, max(sum(sizes), 900)])
+        else:
+            self.sidebar.show()
+            self.sidebar_visible = True
+            self.sidebar_toggle_button.setText("目录")
+            self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarShadeButton))
+            self.splitter.setSizes([max(self.last_sidebar_width, 260), 900])
+
+    def on_preview_link_clicked(self, url: QUrl) -> None:
+        if url.isLocalFile():
+            self.preview_path(Path(url.toLocalFile()))
+
+    def preview_path(self, path: Path) -> None:
+        if not path.exists():
+            self._set_preview_html(
+                f"<h2>位置不可用</h2><p class='path'>{html.escape(str(path))}</p>"
+            )
+            return
+
+        suffix = path.suffix.lower()
+        if suffix == ".md":
+            self._preview_markdown(path)
+        elif suffix == ".pdf":
+            self._preview_pdf(path)
+        else:
+            self._set_preview_html(
+                f"<h2>{html.escape(path.name)}</h2>"
+                f"<p class='muted'>这个文件类型暂不支持内置预览。</p>"
+                f"<p class='path'>{html.escape(str(path))}</p>",
+                path.parent if path.parent.exists() else self.library.root,
+            )
+
+    def _preview_markdown(self, path: Path) -> None:
+        try:
+            markdown = path.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            markdown = path.read_text(encoding="utf-8", errors="replace")
+
+        # Keep relative equation images such as assets/equation_1.png readable
+        # inside the embedded Markdown preview.
+        self.detail.setSearchPaths([str(path.parent), str(path.parent / "assets")])
+        self.detail.document().setBaseUrl(QUrl.fromLocalFile(str(path.parent) + os.sep))
+        self.detail.setMarkdown(markdown)
+        self.statusBar().showMessage(f"正在预览 Markdown：{path.name}")
+
+    def _preview_pdf(self, path: Path) -> None:
+        try:
+            import fitz
+        except ImportError as exc:
+            self._set_preview_html(
+                "<h2>PDF 预览不可用</h2>"
+                f"<p class='muted'>缺少 PyMuPDF：{html.escape(str(exc))}</p>",
+                path.parent,
+            )
+            return
+
+        cache_dir = path.parent / ".preview" / path.stem
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        pdf_mtime = path.stat().st_mtime
+        pages: list[str] = []
+        doc = fitz.open(str(path))
+        try:
+            total = len(doc)
+            for index, page in enumerate(doc, start=1):
+                image_path = cache_dir / f"page_{index:03d}.png"
+                if not image_path.exists() or image_path.stat().st_mtime < pdf_mtime:
+                    pix = page.get_pixmap(matrix=fitz.Matrix(1.45, 1.45), alpha=False)
+                    pix.save(str(image_path))
+                image_url = QUrl.fromLocalFile(str(image_path)).toString()
+                pages.append(
+                    "<div class='pdf-page'>"
+                    f"<p class='muted'>第 {index} / {total} 页</p>"
+                    f"<img src='{image_url}' alt='PDF page {index}' />"
+                    "</div>"
+                )
+                if index % 2 == 0:
+                    QApplication.processEvents()
+        finally:
+            doc.close()
+
+        self._set_preview_html(
+            f"<h2>{html.escape(path.name)}</h2>"
+            "<p class='muted'>PDF 已在程序内渲染为页面预览。</p>"
+            + "".join(pages),
+            cache_dir,
+        )
+        self.statusBar().showMessage(f"正在预览 PDF：{path.name}")
 
     def refresh_folders(self, preferred_path: Path | None = None) -> None:
         self.library_tree.clear()
@@ -469,10 +655,11 @@ class MainWindow(QMainWindow):
 
         kind = data.get("kind")
         if kind == "collection":
-            self.detail.setText(
+            self._set_preview_html(
                 f"<h2>{folder.name}</h2>"
-                f"<p>双击左侧文件夹可展开/收起论文列表。</p>"
-                f"<p>路径：{folder.path}</p>"
+                "<p class='muted'>双击左侧文件夹可展开/收起论文列表；单击论文或文件可在这里查看入口或预览。</p>"
+                f"<p class='path'>路径：{html.escape(str(folder.path))}</p>",
+                folder.path,
             )
         elif kind == "paper":
             paper = data["paper"]
@@ -494,7 +681,7 @@ class MainWindow(QMainWindow):
             item.setExpanded(not item.isExpanded())
             return
         if path:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            self.preview_path(Path(path))
 
     def create_folder(self) -> None:
         name, ok = QInputDialog.getText(self, "新建文件夹", "文件夹名称：")
@@ -661,7 +848,11 @@ class MainWindow(QMainWindow):
     def on_finished(self, outputs: PaperOutputs) -> None:
         self._reset_processing_state()
         self.statusBar().showMessage("生成完成，进度已复位")
-        self.refresh_folders()
+        self.refresh_folders(preferred_path=outputs.paper_dir)
+        if outputs.translated_md:
+            self.preview_path(outputs.translated_md)
+        elif outputs.summary_md:
+            self.preview_path(outputs.summary_md)
         generated = [path for path in [outputs.translated_md, outputs.summary_md] if path is not None]
         QMessageBox.information(self, "生成完成", "已生成：\n" + "\n".join(str(path) for path in generated))
 
@@ -677,7 +868,10 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "已取消", f"{message}\n半截输出已清理，旧的完整文件会保留。")
 
     def show_paper_detail(self, paper: PaperRecord) -> None:
-        links = [f"<h2>{paper.name}</h2>"]
+        links = [
+            f"<h2>{html.escape(paper.name)}</h2>",
+            "<p class='muted'>点击下面的入口，或双击左侧文件，即可在本窗口中预览。</p>",
+        ]
         for label, path in [
             ("英文论文 PDF", paper.original_pdf),
             ("中文译文 Markdown", paper.translated_md),
@@ -685,17 +879,25 @@ class MainWindow(QMainWindow):
         ]:
             if path:
                 url = QUrl.fromLocalFile(str(path)).toString()
-                links.append(f'<p><a href="{url}">{label}</a><br><span>{path}</span></p>')
-        links.append(f"<p>文件夹：{paper.path}</p>")
-        self.detail.setText("\n".join(links))
+                links.append(
+                    "<div class='file-card'>"
+                    f"<a href='{url}'>{html.escape(label)}</a>"
+                    f"<p class='path'>{html.escape(str(path))}</p>"
+                    "</div>"
+                )
+        links.append(f"<p class='path'>文件夹：{html.escape(str(paper.path))}</p>")
+        self._set_preview_html("\n".join(links), paper.path)
 
     def show_path_detail(self, path: Path) -> None:
-        url = QUrl.fromLocalFile(str(path)).toString()
+        if path.is_file() and path.suffix.lower() in {".md", ".pdf"}:
+            self.preview_path(path)
+            return
         kind = "文件夹" if path.is_dir() else "文件"
-        self.detail.setText(
-            f"<h2>{path.name}</h2>"
-            f'<p><a href="{url}">打开{kind}</a><br><span>{path}</span></p>'
-            "<p>单击左侧节点可选中；双击文件会打开，双击文件夹会展开或收起。</p>"
+        self._set_preview_html(
+            f"<h2>{html.escape(path.name)}</h2>"
+            f"<p class='muted'>已选中{kind}。双击左侧文件夹会展开或收起；Markdown/PDF 文件会在这里预览。</p>"
+            f"<p class='path'>{html.escape(str(path))}</p>",
+            path if path.is_dir() else path.parent,
         )
 
 
