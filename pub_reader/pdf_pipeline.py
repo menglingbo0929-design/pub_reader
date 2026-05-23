@@ -290,10 +290,21 @@ def _extract_plain_text(pdf_path: Path) -> tuple[str, str]:
     with fitz.open(pdf_path) as doc:
         title = _guess_title(doc, pdf_path)
         start_page = _start_page_index(doc)
-        parts = [
-            _prepare_text_for_model(_clean_text(_page_plain_text(doc[index], skip_first_page_metadata=(index == 0))))
-            for index in range(start_page, len(doc))
-        ]
+        parts: list[str] = []
+        reached_references = False
+        for index in range(start_page, len(doc)):
+            page = doc[index]
+            page_parts: list[str] = []
+            for element in _text_blocks_with_heading_levels(page, skip_first_page_metadata=(index == 0)):
+                if _is_references_heading(element.text):
+                    reached_references = True
+                    break
+                if element.text.strip():
+                    page_parts.append(element.text)
+            if page_parts:
+                parts.append(_prepare_text_for_model(_clean_text("\n\n".join(page_parts))))
+            if reached_references:
+                break
     return title, "\n\n".join(part for part in parts if part)
 
 
@@ -462,6 +473,12 @@ def _heading_level(text: str, font_size: float, is_bold: bool, page_font_size: f
             return 3
         return 2
     return None
+
+
+def _is_references_heading(text: str) -> bool:
+    normalized = re.sub(r"^\d+(\.\d+)*\s+", "", text.strip(), flags=re.IGNORECASE)
+    normalized = normalized.strip(" .:：").lower()
+    return normalized in {"references", "bibliography", "reference"}
 
 
 def _is_noise_block(text: str, bbox: fitz.Rect, page: fitz.Page, font_size: float = 0.0) -> bool:
@@ -1043,6 +1060,31 @@ def _postprocess_translated_markdown(markdown: str, protected: dict[str, str]) -
     return _normalize_marker_lines(_format_display_formula_lines(cleaned))
 
 
+def _remove_summary_section(markdown: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"^##\s+{re.escape(heading)}\s*$.*?(?=^##\s+|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    return pattern.sub("", markdown).strip()
+
+
+def _postprocess_summary(summary: str, field_context: FieldContext) -> str:
+    summary = _remove_summary_section(summary, "一句话概括")
+    summary = _remove_summary_section(summary, "可能的疑问与后续阅读建议")
+    summary = summary.strip()
+    tag_block = (
+        "## 论文领域标签\n"
+        f"- 领域：{field_context.field}\n"
+        f"- 子领域：{field_context.subfield}\n"
+        f"- 关键词/术语提示：{field_context.terminology_notes}\n"
+    )
+    if not summary.startswith("# 论文阅读摘要"):
+        return f"# 论文阅读摘要\n\n{tag_block}\n\n{summary}".strip() + "\n"
+    if "## 论文领域标签" in summary:
+        return summary.strip() + "\n"
+    return summary.replace("# 论文阅读摘要", f"# 论文阅读摘要\n\n{tag_block}", 1).strip() + "\n"
+
+
 def _normalize_marker_lines(markdown: str) -> str:
     lines = []
     for line in markdown.splitlines():
@@ -1250,12 +1292,11 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
     markdown_parts = [f"# {title}", ""]
     plain_text_parts: list[str] = []
     assets_dir = output_dir / "assets"
+    reached_references = False
 
     for page_index in range(start_page, len(doc)):
         page = doc[page_index]
-        plain_text_parts.append(
-            _prepare_text_for_model(_clean_text(_page_plain_text(page, skip_first_page_metadata=(page_index == 0))))
-        )
+        page_plain_parts: list[str] = []
 
         for element in _text_only_layout_elements(
             page,
@@ -1263,8 +1304,17 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
             assets_dir=assets_dir,
             page_number=page_index + 1,
         ):
+            if _is_references_heading(element.text):
+                reached_references = True
+                break
+            if element.text.strip():
+                page_plain_parts.append(element.text)
             markdown_parts.append(_markdown_for_text_element(element))
             markdown_parts.append("")
+        if page_plain_parts:
+            plain_text_parts.append(_prepare_text_for_model(_clean_text("\n\n".join(page_plain_parts))))
+        if reached_references:
+            break
 
     doc.close()
     source_markdown = _prepare_text_for_model("\n".join(markdown_parts))
@@ -1375,7 +1425,10 @@ def generate_summary(
     check_cancelled(cancel_check)
 
     report("正在调用 DeepSeek 生成中文 brief summary", 58)
-    summary = client.summarize(plain_text, field_context, cancel_check=cancel_check)
+    summary = _postprocess_summary(
+        client.summarize(plain_text, field_context, cancel_check=cancel_check),
+        field_context,
+    )
     summary_path = paper_dir / "summary.md"
     _write_text_atomic(summary_path, summary, cancel_check)
 
