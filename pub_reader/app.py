@@ -462,6 +462,7 @@ class MainWindow(QMainWindow):
         self.selected_pdf_label.setWordWrap(True)
         self.selected_pdf_label.setMinimumHeight(42)
         upload_layout.addLayout(upload_top)
+        upload_layout.addSpacing(14)
         upload_layout.addWidget(upload_hint)
         upload_layout.addWidget(upload_format_hint)
         upload_layout.addWidget(self.selected_pdf_label)
