@@ -62,6 +62,11 @@ class LayoutElement:
     heading_level: int | None = None
 
 
+CITATION_RE = re.compile(
+    r"\s*\[(?:[A-Za-z][A-Za-z0-9]*\+?\d{2,4})(?:\s*[,;]\s*[A-Za-z][A-Za-z0-9]*\+?\d{2,4})*\]"
+)
+
+
 def _clean_text(text: str) -> str:
     # Normalize common PDF extraction artifacts before sending text to the LLM.
     text = text.replace("\x00", "")
@@ -69,6 +74,13 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _strip_inline_citations(text: str) -> str:
+    text = CITATION_RE.sub("", text)
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r" +([,.;:，。；：])", r"\1", text)
+    return text
 
 
 def _guess_title(doc: fitz.Document, pdf_path: Path) -> str:
@@ -171,6 +183,15 @@ def _block_text(block: dict) -> str:
     return _clean_text("\n".join(lines))
 
 
+def _block_line_items(block: dict) -> list[tuple[fitz.Rect, str]]:
+    items: list[tuple[fitz.Rect, str]] = []
+    for line in block.get("lines", []):
+        line_text = "".join(span.get("text", "") for span in line.get("spans", [])).strip()
+        if line_text:
+            items.append((fitz.Rect(line["bbox"]), line_text))
+    return items
+
+
 def _caption_kind(text: str) -> str | None:
     match = CAPTION_RE.match(text.strip())
     if not match:
@@ -212,10 +233,10 @@ def _expand_rect(rect: fitz.Rect, page: fitz.Page, margin: float = 4) -> fitz.Re
     return expanded & page.rect
 
 
-def _save_page_clip(page: fitz.Page, rect: fitz.Rect, assets_dir: Path, name: str) -> str:
+def _save_page_clip(page: fitz.Page, rect: fitz.Rect, assets_dir: Path, name: str, margin: float = 4) -> str:
     # Cropping the rendered page preserves the original visual appearance of
     # figures, equations, and tables instead of asking the model to recreate it.
-    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=_expand_rect(rect, page), alpha=False)
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=_expand_rect(rect, page, margin=margin), alpha=False)
     image_name = f"{name}.png"
     image_path = assets_dir / image_name
     pix.save(image_path)
@@ -327,7 +348,94 @@ def _first_body_y(blocks: list[LayoutElement], page: fitz.Page) -> float | None:
     return None
 
 
-def _text_blocks_with_heading_levels(page: fitz.Page, skip_first_page_metadata: bool = False) -> list[LayoutElement]:
+def _numbered_equation_segments(
+    block: dict,
+    page: fitz.Page,
+    assets_dir: Path | None,
+    page_number: int,
+    equation_start: int,
+) -> tuple[list[LayoutElement] | None, int]:
+    if assets_dir is None:
+        return None, equation_start
+
+    lines = _block_line_items(block)
+    number_indices = [
+        index
+        for index, (bbox, text) in enumerate(lines)
+        if re.fullmatch(r"\(\d+\)", text.strip()) and bbox.x0 > page.rect.width * 0.70
+    ]
+    if not number_indices:
+        return None, equation_start
+
+    elements: list[LayoutElement] = []
+    consumed: set[int] = set()
+    cursor = 0
+    equation_index = equation_start
+
+    for number_index in number_indices:
+        number_bbox, number_text = lines[number_index]
+        formula_indices: list[int] = []
+        for index, (bbox, text) in enumerate(lines):
+            if index in consumed:
+                continue
+            same_band = bbox.y1 >= number_bbox.y0 - 16 and bbox.y0 <= number_bbox.y1 + 10
+            centered = bbox.x0 > page.rect.width * 0.22 or index == number_index
+            label = bool(re.fullmatch(r"\([A-Za-z][A-Za-z ]+\)", text.strip()))
+            if same_band and centered and (_looks_like_formula_line(text) or label or index == number_index):
+                formula_indices.append(index)
+        if not formula_indices:
+            continue
+
+        first_formula = min(formula_indices)
+        if cursor < first_formula:
+            before_text = _clean_text("\n".join(text for _, text in lines[cursor:first_formula]))
+            if before_text:
+                before_bbox = fitz.Rect(lines[cursor][0])
+                for index in range(cursor + 1, first_formula):
+                    before_bbox |= lines[index][0]
+                elements.append(LayoutElement(kind="text", bbox=before_bbox, text=before_text))
+
+        formula_bbox = fitz.Rect(lines[formula_indices[0]][0])
+        for index in formula_indices[1:]:
+            formula_bbox |= lines[index][0]
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        rel_path = _save_page_clip(
+            page,
+            formula_bbox,
+            assets_dir,
+            f"page-{page_number:03d}-equation-{equation_index:02d}",
+            margin=2,
+        )
+        elements.append(
+            LayoutElement(
+                kind="formula_image",
+                bbox=formula_bbox,
+                markdown=f"![Equation {number_text}]({rel_path})",
+            )
+        )
+        consumed.update(formula_indices)
+        cursor = max(formula_indices) + 1
+        equation_index += 1
+
+    if not elements:
+        return None, equation_start
+
+    if cursor < len(lines):
+        after_text = _clean_text("\n".join(text for _, text in lines[cursor:]))
+        if after_text:
+            after_bbox = fitz.Rect(lines[cursor][0])
+            for index in range(cursor + 1, len(lines)):
+                after_bbox |= lines[index][0]
+            elements.append(LayoutElement(kind="text", bbox=after_bbox, text=after_text))
+    return elements, equation_index
+
+
+def _text_blocks_with_heading_levels(
+    page: fitz.Page,
+    skip_first_page_metadata: bool = False,
+    assets_dir: Path | None = None,
+    page_number: int = 0,
+) -> list[LayoutElement]:
     raw_blocks = [block for block in page.get_text("dict").get("blocks", []) if block.get("type") == 0]
     font_sizes: list[float] = []
     for block in raw_blocks:
@@ -337,6 +445,7 @@ def _text_blocks_with_heading_levels(page: fitz.Page, skip_first_page_metadata: 
     page_font_size = sorted(font_sizes)[len(font_sizes) // 2] if font_sizes else 10.0
 
     elements: list[LayoutElement] = []
+    equation_index = 1
     for block in raw_blocks:
         text = _block_text(block)
         if not text:
@@ -344,6 +453,19 @@ def _text_blocks_with_heading_levels(page: fitz.Page, skip_first_page_metadata: 
         bbox = fitz.Rect(block["bbox"])
         font_size, is_bold = _block_font_stats(block)
         if _is_noise_block(text, bbox, page, font_size):
+            continue
+        equation_elements, equation_index = _numbered_equation_segments(
+            block,
+            page,
+            assets_dir,
+            page_number,
+            equation_index,
+        )
+        if equation_elements is not None:
+            for element in equation_elements:
+                if element.kind == "text":
+                    element.heading_level = _heading_level(element.text, font_size, is_bold, page_font_size)
+                elements.append(element)
             continue
         elements.append(
             LayoutElement(
@@ -448,16 +570,27 @@ def _skip_table_or_algorithm_body(
                 skip_text.add(index)
 
 
-def _text_only_layout_elements(page: fitz.Page, skip_first_page_metadata: bool = False) -> list[LayoutElement]:
-    raw_text_blocks = _text_blocks_with_heading_levels(page, skip_first_page_metadata)
+def _text_only_layout_elements(
+    page: fitz.Page,
+    skip_first_page_metadata: bool = False,
+    assets_dir: Path | None = None,
+    page_number: int = 0,
+) -> list[LayoutElement]:
+    raw_text_blocks = _text_blocks_with_heading_levels(
+        page,
+        skip_first_page_metadata,
+        assets_dir=assets_dir,
+        page_number=page_number,
+    )
     caption_blocks = [
         TextBlock(block.bbox, block.text, _caption_kind(block.text))
         for block in raw_text_blocks
-        if _caption_kind(block.text) is not None
+        if block.text and _caption_kind(block.text) is not None
     ]
     primitive_text_blocks = [
         TextBlock(block.bbox, block.text, _caption_kind(block.text))
         for block in raw_text_blocks
+        if block.text
     ]
     primitives = _primitive_rects(page, primitive_text_blocks)
     elements: list[LayoutElement] = []
@@ -489,6 +622,9 @@ def _text_only_layout_elements(page: fitz.Page, skip_first_page_metadata: bool =
     for index, block in enumerate(raw_text_blocks):
         if index in skip_text:
             continue
+        if block.kind == "formula_image":
+            elements.append(block)
+            continue
         if _caption_kind(block.text) is not None:
             continue
         elements.append(block)
@@ -499,13 +635,15 @@ def _text_only_layout_elements(page: fitz.Page, skip_first_page_metadata: bool =
 
 def _markdown_for_text_element(element: LayoutElement) -> str:
     text = element.text.strip()
+    if element.kind == "formula_image":
+        return element.markdown
     if element.kind == "caption_marker":
-        return text
+        return _strip_inline_citations(text)
     if element.heading_level:
         prefix = "#" * element.heading_level
-        heading_text = re.sub(r"\s+", " ", text).strip()
+        heading_text = re.sub(r"\s+", " ", _strip_inline_citations(text)).strip()
         return f"{prefix} {heading_text}"
-    return text
+    return _strip_inline_citations(text)
 
 
 def _split_markdown_chunks(markdown: str, max_chars: int = 9000) -> list[str]:
@@ -569,6 +707,12 @@ def _protect_formula_lines(markdown: str) -> tuple[str, dict[str, str]]:
             in_marker = not in_marker
             output_lines.append(line)
             continue
+        if line.strip().startswith("![Equation "):
+            token = f"[[[FORMULA_{counter:04d}]]]"
+            protected[token] = line
+            output_lines.append(token)
+            counter += 1
+            continue
         if not in_marker and _looks_like_formula_line(line):
             token = f"[[[FORMULA_{counter:04d}]]]"
             protected[token] = line
@@ -609,6 +753,12 @@ def _format_display_formula_lines(markdown: str) -> str:
             if next_line.strip() and not _looks_like_formula_line(next_line.strip()):
                 formatted.append("")
     return "\n".join(formatted)
+
+
+def _postprocess_translated_markdown(markdown: str, protected: dict[str, str]) -> str:
+    restored = _restore_formula_lines(markdown, protected)
+    cleaned = _strip_inline_citations(restored)
+    return _normalize_marker_lines(_format_display_formula_lines(cleaned))
 
 
 def _normalize_marker_lines(markdown: str) -> str:
@@ -817,17 +967,23 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
     title = _guess_title(doc, pdf_path)
     markdown_parts = [f"# {title}", ""]
     plain_text_parts: list[str] = []
+    assets_dir = output_dir / "assets"
 
     for page_index in range(start_page, len(doc)):
         page = doc[page_index]
-        plain_text_parts.append(_clean_text(_page_plain_text(page, skip_first_page_metadata=(page_index == 0))))
+        plain_text_parts.append(_strip_inline_citations(_clean_text(_page_plain_text(page, skip_first_page_metadata=(page_index == 0)))))
 
-        for element in _text_only_layout_elements(page, skip_first_page_metadata=(page_index == 0)):
+        for element in _text_only_layout_elements(
+            page,
+            skip_first_page_metadata=(page_index == 0),
+            assets_dir=assets_dir,
+            page_number=page_index + 1,
+        ):
             markdown_parts.append(_markdown_for_text_element(element))
             markdown_parts.append("")
 
     doc.close()
-    source_markdown = "\n".join(markdown_parts)
+    source_markdown = _strip_inline_citations("\n".join(markdown_parts))
     protected_markdown, protected_formulas = _protect_formula_lines(source_markdown)
     return (
         protected_markdown,
@@ -854,7 +1010,7 @@ def generate_translation(
     title, paper_dir, original_pdf = _prepare_paper_workspace(pdf_path, library_folder, progress)
     check_cancelled(cancel_check)
 
-    report("正在抽取纯文本译文骨架，不生成图表截图", 18)
+    report("正在抽取译文骨架并截图编号公式", 18)
     assets_dir = paper_dir / "assets"
     if assets_dir.exists():
         shutil.rmtree(assets_dir)
@@ -869,7 +1025,8 @@ def generate_translation(
 
     report("正在调用 DeepSeek 翻译纯文本 Markdown", 42)
     # Translate large Markdown chunks instead of hundreds of small PDF blocks.
-    # This avoids asset generation and reduces network round trips.
+    # Numbered equations are protected as screenshot tokens so their visual
+    # layout stays identical to the PDF.
     translated_blocks = client.translate_chunks(
         blocks,
         field_context,
@@ -880,9 +1037,7 @@ def generate_translation(
         cancel_check=cancel_check,
     )
     check_cancelled(cancel_check)
-    translated_md = _normalize_marker_lines(
-        _format_display_formula_lines(_restore_formula_lines("\n\n".join(translated_blocks), protected_formulas))
-    )
+    translated_md = _postprocess_translated_markdown("\n\n".join(translated_blocks), protected_formulas)
 
     translated_path = paper_dir / "translated.md"
     _write_text_atomic(translated_path, translated_md, cancel_check)
