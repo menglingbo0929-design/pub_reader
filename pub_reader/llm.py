@@ -28,6 +28,21 @@ class FieldContext:
     subfield: str
     terminology_notes: str
 
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "field": self.field,
+            "subfield": self.subfield,
+            "terminology_notes": self.terminology_notes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "FieldContext":
+        return cls(
+            field=str(data.get("field", "未知领域")),
+            subfield=str(data.get("subfield", "未知子领域")),
+            terminology_notes=str(data.get("terminology_notes", "按通用学术中文术语翻译。")),
+        )
+
     def to_prompt_text(self) -> str:
         return (
             f"领域：{self.field}\n"

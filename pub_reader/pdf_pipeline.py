@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from typing import Callable
 import fitz
 
 from pub_reader.cancel import CancelCheck, check_cancelled
-from pub_reader.llm import DeepSeekClient
+from pub_reader.llm import DeepSeekClient, FieldContext
 
 
 ProgressCallback = Callable[[str, int], None]
@@ -38,6 +39,63 @@ def _write_text_atomic(target: Path, content: str, cancel_check: CancelCheck | N
         if temp_path.exists():
             temp_path.unlink()
         raise
+
+
+def _field_cache_path(paper_dir: Path) -> Path:
+    return paper_dir / "field_context.json"
+
+
+def _field_tag(context: FieldContext) -> str:
+    parts = [context.field.strip(), context.subfield.strip()]
+    return " / ".join(part for part in parts if part and not part.startswith("未知")) or "通用学术论文"
+
+
+def _load_field_context(paper_dir: Path) -> FieldContext | None:
+    path = _field_cache_path(paper_dir)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    context_data = data.get("context", data)
+    if not isinstance(context_data, dict):
+        return None
+    return FieldContext.from_dict(context_data)
+
+
+def _save_field_context(paper_dir: Path, context: FieldContext, cancel_check: CancelCheck | None = None) -> None:
+    data = {
+        "tag": _field_tag(context),
+        "context": context.to_dict(),
+    }
+    _write_text_atomic(
+        _field_cache_path(paper_dir),
+        json.dumps(data, ensure_ascii=False, indent=2),
+        cancel_check,
+    )
+
+
+def _get_or_detect_field_context(
+    paper_dir: Path,
+    sample_text: str,
+    client: DeepSeekClient,
+    report: ProgressCallback,
+    progress_value: int,
+    cancel_check: CancelCheck | None = None,
+) -> FieldContext:
+    cached = _load_field_context(paper_dir)
+    if cached is not None:
+        report(f"使用已缓存论文领域标签：{_field_tag(cached)}", progress_value)
+        return cached
+
+    report("正在判断论文领域", progress_value)
+    context = client.detect_field(sample_text, cancel_check=cancel_check)
+    _save_field_context(paper_dir, context, cancel_check)
+    report(f"已缓存论文领域标签：{_field_tag(context)}", progress_value)
+    return context
 
 
 @dataclass
@@ -81,6 +139,64 @@ def _strip_inline_citations(text: str) -> str:
     text = re.sub(r" {2,}", " ", text)
     text = re.sub(r" +([,.;:，。；：])", r"\1", text)
     return text
+
+
+def _apply_inline_math_patterns(text: str) -> str:
+    protected: dict[str, str] = {}
+
+    def protect(pattern: str, replacement: str) -> None:
+        nonlocal text
+
+        def repl(_match: re.Match[str]) -> str:
+            token = f"@@MATH_{len(protected):04d}@@"
+            protected[token] = _match.expand(replacement)
+            return token
+
+        text = re.sub(pattern, repl, text)
+
+    protected_replacements = [
+        (r"\bT\s*=\s*\{\(x,\s*y[tT]\)\}", r"$T = \\{(x, y_t)\\}$"),
+        (r"\(x,\s*y[tT]\)", r"$(x, y_t)$"),
+        (r"\bV\s*\(\s*G\s*,\s*D\s*\)", r"$V(G,D)$"),
+        (r"\bD\s*\(\s*\[\s*x\s*,\s*y\s*\]\s*\)", r"$D([x,y])$"),
+        (r"\bD\s*\(\s*G\s*\(\s*x\s*\)\s*\)", r"$D(G(x))$"),
+        (r"\bG\s*\(\s*x\s*\)", r"$G(x)$"),
+        (r"\bqG\s*\(\s*·\s*\|\s*x\s*\)", r"$q_G(\\cdot\\mid x)$"),
+        (r"\byt\b", r"$y_t$"),
+        (r"\by_t\b", r"$y_t$"),
+        (r"\bβ\s*=\s*([0-9.]+)", r"$\\beta = \1$"),
+        (r"\bσ\s*\(·\)", r"$\\sigma(\\cdot)$"),
+    ]
+    for pattern, replacement in protected_replacements:
+        protect(pattern, replacement)
+
+    replacements = [
+        (r"\bG\b", r"$G$"),
+        (r"\bD\b", r"$D$"),
+        (r"\bT\b", r"$T$"),
+        (r"(?<![\w.-])x(?![\w.-])", r"$x$"),
+        (r"(?<![\w.-])y(?![\w.-])", r"$y$"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+    for token, value in protected.items():
+        text = text.replace(token, value)
+    return text
+
+
+def _normalize_inline_math_notation(text: str) -> str:
+    parts = re.split(r"(`[^`]*`|\$[^$]*\$|!\[[^\]]*\]\([^)]+\))", text)
+    for index, part in enumerate(parts):
+        if not part or part.startswith(("`", "$", "![")):
+            continue
+        parts[index] = _apply_inline_math_patterns(part)
+    text = "".join(parts)
+    text = re.sub(r"\${2,}", "$", text)
+    return text
+
+
+def _prepare_text_for_model(text: str) -> str:
+    return _normalize_inline_math_notation(_strip_inline_citations(text))
 
 
 def _guess_title(doc: fitz.Document, pdf_path: Path) -> str:
@@ -167,7 +283,7 @@ def _extract_plain_text(pdf_path: Path) -> tuple[str, str]:
         title = _guess_title(doc, pdf_path)
         start_page = _start_page_index(doc)
         parts = [
-            _clean_text(_page_plain_text(doc[index], skip_first_page_metadata=(index == 0)))
+            _prepare_text_for_model(_clean_text(_page_plain_text(doc[index], skip_first_page_metadata=(index == 0))))
             for index in range(start_page, len(doc))
         ]
     return title, "\n\n".join(part for part in parts if part)
@@ -176,17 +292,35 @@ def _extract_plain_text(pdf_path: Path) -> tuple[str, str]:
 def _block_text(block: dict) -> str:
     lines: list[str] = []
     for line in block.get("lines", []):
-        spans = [span.get("text", "") for span in line.get("spans", [])]
-        line_text = "".join(spans).strip()
+        line_text = _line_text_without_footnote_markers(line)
         if line_text:
             lines.append(line_text)
     return _clean_text("\n".join(lines))
 
 
+def _line_text_without_footnote_markers(line: dict) -> str:
+    spans = line.get("spans", [])
+    max_size = max((float(span.get("size", 0)) for span in spans), default=0.0)
+    line_y0 = float(line.get("bbox", [0, 0, 0, 0])[1])
+    pieces: list[str] = []
+    for span in spans:
+        text = span.get("text", "")
+        stripped = text.strip()
+        size = float(span.get("size", 0))
+        bbox = fitz.Rect(span.get("bbox", (0, 0, 0, 0)))
+        superscript_marker = (
+            stripped in {"+", "*", "†", "‡"} or re.fullmatch(r"\d{1,2}", stripped) is not None
+        )
+        if superscript_marker and max_size - size >= 2 and bbox.y0 <= line_y0 + 3:
+            continue
+        pieces.append(text)
+    return "".join(pieces).strip()
+
+
 def _block_line_items(block: dict) -> list[tuple[fitz.Rect, str]]:
     items: list[tuple[fitz.Rect, str]] = []
     for line in block.get("lines", []):
-        line_text = "".join(span.get("text", "") for span in line.get("spans", [])).strip()
+        line_text = _line_text_without_footnote_markers(line)
         if line_text:
             items.append((fitz.Rect(line["bbox"]), line_text))
     return items
@@ -638,12 +772,12 @@ def _markdown_for_text_element(element: LayoutElement) -> str:
     if element.kind == "formula_image":
         return element.markdown
     if element.kind == "caption_marker":
-        return _strip_inline_citations(text)
+        return _prepare_text_for_model(text)
     if element.heading_level:
         prefix = "#" * element.heading_level
-        heading_text = re.sub(r"\s+", " ", _strip_inline_citations(text)).strip()
+        heading_text = re.sub(r"\s+", " ", _prepare_text_for_model(text)).strip()
         return f"{prefix} {heading_text}"
-    return _strip_inline_citations(text)
+    return _prepare_text_for_model(text)
 
 
 def _split_markdown_chunks(markdown: str, max_chars: int = 9000) -> list[str]:
@@ -757,7 +891,7 @@ def _format_display_formula_lines(markdown: str) -> str:
 
 def _postprocess_translated_markdown(markdown: str, protected: dict[str, str]) -> str:
     restored = _restore_formula_lines(markdown, protected)
-    cleaned = _strip_inline_citations(restored)
+    cleaned = _prepare_text_for_model(restored)
     return _normalize_marker_lines(_format_display_formula_lines(cleaned))
 
 
@@ -971,7 +1105,9 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
 
     for page_index in range(start_page, len(doc)):
         page = doc[page_index]
-        plain_text_parts.append(_strip_inline_citations(_clean_text(_page_plain_text(page, skip_first_page_metadata=(page_index == 0)))))
+        plain_text_parts.append(
+            _prepare_text_for_model(_clean_text(_page_plain_text(page, skip_first_page_metadata=(page_index == 0))))
+        )
 
         for element in _text_only_layout_elements(
             page,
@@ -983,7 +1119,7 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
             markdown_parts.append("")
 
     doc.close()
-    source_markdown = _strip_inline_citations("\n".join(markdown_parts))
+    source_markdown = _prepare_text_for_model("\n".join(markdown_parts))
     protected_markdown, protected_formulas = _protect_formula_lines(source_markdown)
     return (
         protected_markdown,
@@ -1019,8 +1155,14 @@ def generate_translation(
     sample = plain_text[:9000]
     check_cancelled(cancel_check)
 
-    report("正在判断论文领域", 30)
-    field_context = client.detect_field(sample, cancel_check=cancel_check)
+    field_context = _get_or_detect_field_context(
+        paper_dir,
+        sample,
+        client,
+        report,
+        30,
+        cancel_check,
+    )
     check_cancelled(cancel_check)
 
     report("正在调用 DeepSeek 翻译纯文本 Markdown", 42)
@@ -1074,8 +1216,14 @@ def generate_summary(
     sample = plain_text[:9000]
     check_cancelled(cancel_check)
 
-    report("正在判断论文领域", 38)
-    field_context = client.detect_field(sample, cancel_check=cancel_check)
+    field_context = _get_or_detect_field_context(
+        paper_dir,
+        sample,
+        client,
+        report,
+        38,
+        cancel_check,
+    )
     check_cancelled(cancel_check)
 
     report("正在调用 DeepSeek 生成中文 brief summary", 58)
