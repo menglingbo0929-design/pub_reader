@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSplitter,
     QStatusBar,
-    QStyle,
     QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
@@ -162,14 +161,14 @@ class MainWindow(QMainWindow):
         self.nav_rail = QFrame()
         self.nav_rail.setObjectName("NavRail")
         rail_layout = QVBoxLayout(self.nav_rail)
-        rail_layout.setContentsMargins(8, 10, 8, 10)
+        rail_layout.setContentsMargins(10, 14, 10, 14)
         rail_layout.setSpacing(8)
 
         self.sidebar_toggle_button = QPushButton()
         self.sidebar_toggle_button.setObjectName("RailButton")
         self.sidebar_toggle_button.setText("☰")
         self.sidebar_toggle_button.setToolTip("展开/收起目录")
-        self.sidebar_toggle_button.setMinimumSize(36, 36)
+        self.sidebar_toggle_button.setMinimumSize(44, 44)
         self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
         rail_layout.addWidget(self.sidebar_toggle_button)
         rail_layout.addStretch()
@@ -188,13 +187,6 @@ class MainWindow(QMainWindow):
         app_title = QLabel("Pub Reader")
         app_title.setObjectName("AppTitle")
         sidebar_header.addWidget(app_title, 1)
-
-        sidebar_close = QPushButton("‹")
-        sidebar_close.setObjectName("IconButton")
-        sidebar_close.setToolTip("收起目录")
-        sidebar_close.setMinimumSize(36, 36)
-        sidebar_close.clicked.connect(self.toggle_sidebar)
-        sidebar_header.addWidget(sidebar_close)
 
         subtitle = QLabel("英文论文中文阅读工作台")
         subtitle.setObjectName("Subtitle")
@@ -231,16 +223,17 @@ class MainWindow(QMainWindow):
         content = QFrame()
         content.setObjectName("Content")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(28, 24, 28, 24)
-        content_layout.setSpacing(16)
+        content_layout.setContentsMargins(34, 28, 34, 28)
+        content_layout.setSpacing(18)
 
         top_panel = QFrame()
         top_panel.setObjectName("TopPanel")
         top_panel_layout = QVBoxLayout(top_panel)
-        top_panel_layout.setContentsMargins(22, 20, 22, 20)
-        top_panel_layout.setSpacing(14)
+        top_panel_layout.setContentsMargins(26, 24, 26, 22)
+        top_panel_layout.setSpacing(16)
 
         header = QHBoxLayout()
+        header.setSpacing(14)
         heading_box = QVBoxLayout()
         heading_box.setSpacing(6)
         heading = QLabel("论文处理")
@@ -251,6 +244,7 @@ class MainWindow(QMainWindow):
         heading_box.addWidget(self.folder_label)
 
         self.upload_button = QPushButton("选择 PDF")
+        self.upload_button.setObjectName("OutlineButton")
         self.upload_button.setMinimumHeight(42)
         self.upload_button.clicked.connect(self.choose_pdf)
         self.translate_button = QPushButton(self.translate_text)
@@ -270,12 +264,16 @@ class MainWindow(QMainWindow):
         self.selected_pdf_label = QLabel("尚未选择 PDF")
         self.selected_pdf_label.setObjectName("SelectedFile")
 
+        selected_file_caption = QLabel("当前论文文件")
+        selected_file_caption.setObjectName("FieldLabel")
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
 
         top_panel_layout.addLayout(header)
+        top_panel_layout.addWidget(selected_file_caption)
         top_panel_layout.addWidget(self.selected_pdf_label)
         top_panel_layout.addWidget(self.progress)
 
@@ -283,9 +281,9 @@ class MainWindow(QMainWindow):
         preview_shell.setObjectName("PreviewShell")
         preview_layout = QVBoxLayout(preview_shell)
         preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_layout.setSpacing(10)
+        preview_layout.setSpacing(12)
 
-        preview_title = QLabel("阅读预览")
+        preview_title = QLabel("文档预览")
         preview_title.setObjectName("SectionTitle")
 
         self.detail = QTextBrowser()
@@ -316,90 +314,96 @@ class MainWindow(QMainWindow):
             QWidget {
                 font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
                 font-size: 14px;
-                color: #111827;
-                background: #F4F6F8;
+                color: #141A22;
+                background: #F5F7FA;
             }
             QLabel {
                 background: transparent;
             }
             QFrame#AppShell {
-                background: #F4F6F8;
+                background: #F5F7FA;
             }
             QFrame#NavRail {
-                min-width: 52px;
-                max-width: 52px;
-                background: #FFFFFF;
-                border-right: 1px solid #E6E8EC;
+                min-width: 64px;
+                max-width: 64px;
+                background: #F9FAFB;
+                border-right: 1px solid #E7EAF0;
             }
             QFrame#Sidebar {
                 background: #FFFFFF;
-                border-right: 1px solid #E6E8EC;
+                border-right: 1px solid #E7EAF0;
             }
             QFrame#Content {
-                background: #F4F6F8;
+                background: #F5F7FA;
             }
             QFrame#TopPanel {
                 background: #FFFFFF;
-                border: 1px solid #E6E8EC;
-                border-radius: 12px;
+                border: 1px solid #E2E8F0;
+                border-radius: 16px;
             }
             QFrame#PreviewShell {
                 background: transparent;
             }
             QLabel#AppTitle {
-                font-size: 22px;
+                font-size: 24px;
                 font-weight: 700;
-                color: #111827;
+                color: #0F172A;
             }
             QLabel#PageTitle {
-                font-size: 28px;
+                font-size: 30px;
                 font-weight: 700;
-                color: #111827;
+                color: #0F172A;
             }
             QLabel#SectionTitle {
-                font-size: 15px;
+                font-size: 16px;
                 font-weight: 700;
-                color: #1F2937;
+                color: #0F172A;
             }
             QLabel#Subtitle, QLabel#HelperText {
-                color: #6B7280;
+                color: #64748B;
             }
             QLabel#SectionLabel {
-                color: #374151;
-                font-size: 13px;
+                color: #475569;
+                font-size: 12px;
                 font-weight: 700;
                 padding-top: 4px;
             }
+            QLabel#FieldLabel {
+                color: #64748B;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0px;
+            }
             QLabel#SelectedFile {
-                padding: 10px 12px;
+                padding: 12px 14px;
                 background: #F8FAFC;
-                border: 1px solid #E5E7EB;
-                border-radius: 8px;
-                color: #374151;
+                border: 1px solid #E2E8F0;
+                border-radius: 10px;
+                color: #334155;
             }
             QTextBrowser#PreviewPanel {
-                padding: 24px;
+                padding: 26px;
                 background: #FFFFFF;
-                border: 1px solid #E6E8EC;
-                border-radius: 12px;
+                border: 1px solid #E2E8F0;
+                border-radius: 16px;
                 selection-background-color: #B9E6DE;
             }
             QTextBrowser#PreviewPanel h2 {
-                color: #111827;
+                color: #0F172A;
             }
             QTreeWidget {
                 background: #FFFFFF;
-                border: 1px solid #EEF0F3;
-                border-radius: 10px;
-                padding: 8px;
+                border: 1px solid #EEF2F7;
+                border-radius: 14px;
+                padding: 10px;
             }
             QTreeWidget::item {
-                min-height: 36px;
-                padding: 7px 10px;
-                border-radius: 8px;
+                min-height: 38px;
+                padding: 8px 12px;
+                border-radius: 10px;
             }
             QTreeWidget::item:selected {
-                background: #EEF7F5;
+                background: #E6F4F1;
                 color: #0F766E;
             }
             QTreeWidget::branch {
@@ -407,54 +411,49 @@ class MainWindow(QMainWindow):
                 width: 0px;
             }
             QPushButton {
-                min-height: 36px;
-                padding: 8px 16px;
-                border-radius: 8px;
-                border: 1px solid #D7DCE2;
+                min-height: 40px;
+                padding: 9px 18px;
+                border-radius: 10px;
+                border: 1px solid #CBD5E1;
                 background: #FFFFFF;
-                color: #111827;
+                color: #0F172A;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background: #F3F4F6;
+                background: #F8FAFC;
             }
             QPushButton:pressed {
-                background: #E5E7EB;
+                background: #E2E8F0;
             }
             QPushButton:disabled {
                 color: #9CA3AF;
                 background: #F3F4F6;
             }
-            QPushButton#RailButton, QPushButton#IconButton {
-                min-width: 36px;
-                max-width: 36px;
-                min-height: 36px;
-                max-height: 36px;
+            QPushButton#RailButton {
+                min-width: 44px;
+                max-width: 44px;
+                min-height: 44px;
+                max-height: 44px;
                 padding: 0;
-                border-radius: 8px;
+                border-radius: 12px;
                 border: 1px solid transparent;
             }
             QPushButton#RailButton {
-                color: #111827;
+                color: #0F172A;
                 background: transparent;
-                font-size: 18px;
-            }
-            QPushButton#IconButton {
-                color: #4B5563;
-                background: #FFFFFF;
-                font-size: 20px;
+                font-size: 22px;
             }
             QPushButton#RailButton:hover {
-                background: #F3F4F6;
-            }
-            QPushButton#IconButton:hover {
-                background: #F3F4F6;
-                border: 1px solid #E6E8EC;
+                background: #EEF2F7;
             }
             QPushButton#SidebarAction {
-                min-height: 40px;
+                min-height: 42px;
                 padding: 8px 10px;
                 background: #F8FAFC;
+            }
+            QPushButton#OutlineButton {
+                background: #FFFFFF;
+                border: 1px solid #CBD5E1;
             }
             QPushButton#PrimaryButton {
                 background: #0F766E;
@@ -465,12 +464,12 @@ class MainWindow(QMainWindow):
                 background: #115E59;
             }
             QPushButton#SecondaryActionButton {
-                background: #1F2937;
+                background: #0F172A;
                 color: #FFFFFF;
-                border: 1px solid #1F2937;
+                border: 1px solid #0F172A;
             }
             QPushButton#SecondaryActionButton:hover {
-                background: #111827;
+                background: #1E293B;
             }
             QLineEdit {
                 border: 1px solid #D1D5DB;
@@ -483,7 +482,7 @@ class MainWindow(QMainWindow):
                 max-height: 10px;
                 border: 0;
                 border-radius: 5px;
-                background: #E5E7EB;
+                background: #E2E8F0;
                 text-align: center;
                 color: transparent;
             }
@@ -492,7 +491,7 @@ class MainWindow(QMainWindow):
                 background: #0F766E;
             }
             QSplitter::handle {
-                background: #E6E8EC;
+                background: #E7EAF0;
                 width: 1px;
             }
             """
@@ -646,7 +645,6 @@ class MainWindow(QMainWindow):
             folders = self.library.list_folders()
         for folder in folders:
             folder_item = QTreeWidgetItem([folder.name])
-            folder_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
             folder_item.setData(0, Qt.UserRole, {"kind": "collection", "folder": folder, "path": folder.path})
             self.library_tree.addTopLevelItem(folder_item)
             folder_item.setExpanded(True)
@@ -654,7 +652,6 @@ class MainWindow(QMainWindow):
                 preferred_item = folder_item
             for paper in self.library.list_papers(folder):
                 paper_item = QTreeWidgetItem([paper.name])
-                paper_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
                 paper_item.setData(
                     0,
                     Qt.UserRole,
@@ -688,8 +685,6 @@ class MainWindow(QMainWindow):
                 continue
             kind = "dir" if child.is_dir() else "file"
             item = QTreeWidgetItem([child.name])
-            icon = QStyle.SP_DirIcon if child.is_dir() else QStyle.SP_FileIcon
-            item.setIcon(0, self.style().standardIcon(icon))
             item.setData(0, Qt.UserRole, {"kind": kind, "folder": folder, "path": child})
             parent_item.addChild(item)
             if preferred_path is not None and child.resolve() == preferred_path.resolve():
