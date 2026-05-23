@@ -41,7 +41,12 @@ from pub_reader.cancel import GenerationCancelled
 from pub_reader.config import load_config
 from pub_reader.library import LibraryFolder, LibraryManager, PaperRecord
 from pub_reader.llm import DeepSeekClient, DeepSeekError
-from pub_reader.pdf_pipeline import PaperOutputs, generate_summary, generate_translation
+from pub_reader.pdf_pipeline import (
+    PaperOutputs,
+    _prepare_paper_workspace,
+    generate_summary,
+    generate_translation,
+)
 
 
 INVALID_NAME_RE = re.compile(r'[<>:"/\\|?*]+')
@@ -57,8 +62,15 @@ class ApiKeyDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
+        dialog_head = QHBoxLayout()
+        dialog_head.setSpacing(12)
+        key_icon = QLabel()
+        key_icon.setObjectName("DialogKeyIcon")
+        key_icon.setPixmap(self.parent()._make_icon("app", "#2563EB").pixmap(QSize(28, 28)) if isinstance(self.parent(), MainWindow) else QPixmap())
         title = QLabel("接入 DeepSeek API Key")
         title.setObjectName("DialogTitle")
+        dialog_head.addWidget(key_icon)
+        dialog_head.addWidget(title, 1)
         intro = QLabel("应用将调用 DeepSeek-V4-Pro 模型，为论文生成中文译文 Markdown 和总结 Markdown。")
         intro.setObjectName("HelperText")
         intro.setWordWrap(True)
@@ -78,7 +90,7 @@ class ApiKeyDialog(QDialog):
         self.input.setMinimumHeight(44)
 
         helper = QLabel("你的 API Key 仅用于当前本地任务，不会上传或写入项目代码。")
-        helper.setObjectName("HelperText")
+        helper.setObjectName("InfoBox")
 
         buttons = QHBoxLayout()
         cancel = QPushButton("取消")
@@ -90,7 +102,7 @@ class ApiKeyDialog(QDialog):
         buttons.addWidget(cancel)
         buttons.addWidget(confirm)
 
-        layout.addWidget(title)
+        layout.addLayout(dialog_head)
         layout.addWidget(intro)
         layout.addSpacing(4)
         layout.addWidget(model_label)
@@ -228,16 +240,70 @@ class MainWindow(QMainWindow):
             painter.drawLine(7, 15, 15, 7)
             painter.drawLine(10, 7, 15, 7)
             painter.drawLine(15, 7, 15, 12)
+        elif kind == "app":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#2563EB"))
+            painter.drawRoundedRect(3, 3, 16, 16, 4, 4)
+            painter.setBrush(QColor("#DBEAFE"))
+            painter.drawEllipse(7, 7, 8, 8)
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.drawEllipse(9, 9, 4, 4)
+        elif kind == "more":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(color))
+            painter.drawEllipse(10, 5, 2, 2)
+            painter.drawEllipse(10, 10, 2, 2)
+            painter.drawEllipse(10, 15, 2, 2)
+        elif kind == "check":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#22C55E"))
+            painter.drawEllipse(3, 3, 16, 16)
+            painter.setPen(QPen(QColor("#FFFFFF"), 2.0))
+            painter.drawLine(7, 11, 10, 14)
+            painter.drawLine(10, 14, 15, 8)
+        elif kind == "info":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#3B82F6"))
+            painter.drawEllipse(3, 3, 16, 16)
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
+            painter.drawLine(11, 10, 11, 15)
+            painter.drawPoint(11, 7)
+        elif kind == "chevron":
+            painter.drawLine(8, 6, 14, 11)
+            painter.drawLine(14, 11, 8, 16)
         painter.end()
         return QIcon(pixmap)
 
     def _build_ui(self) -> None:
         root = QFrame()
         root.setObjectName("AppShell")
-        root_layout = QHBoxLayout(root)
+        root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         self.setCentralWidget(root)
+
+        topbar = QFrame()
+        topbar.setObjectName("TopBar")
+        topbar.setFixedHeight(54)
+        topbar_layout = QHBoxLayout(topbar)
+        topbar_layout.setContentsMargins(18, 0, 18, 0)
+        topbar_layout.setSpacing(8)
+        app_icon = QLabel()
+        app_icon.setObjectName("AppIcon")
+        app_icon.setPixmap(self._make_icon("app", "#2563EB").pixmap(QSize(24, 24)))
+        app_name = QLabel("pub_reader")
+        app_name.setObjectName("TopBarTitle")
+        topbar_layout.addWidget(app_icon)
+        topbar_layout.addWidget(app_name)
+        topbar_layout.addStretch(1)
+        root_layout.addWidget(topbar)
+
+        body = QFrame()
+        body.setObjectName("Body")
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        root_layout.addWidget(body, 1)
 
         self.sidebar_toggle_button = QPushButton()
         self.sidebar_toggle_button.setObjectName("SidebarToggle")
@@ -254,13 +320,15 @@ class MainWindow(QMainWindow):
         self.sidebar_rail_layout.setSpacing(10)
         self.sidebar_rail_layout.addStretch(1)
         self.sidebar_rail.hide()
-        root_layout.addWidget(self.sidebar_rail)
+        body_layout.addWidget(self.sidebar_rail)
 
         self.splitter = QSplitter(Qt.Horizontal)
-        root_layout.addWidget(self.splitter, 1)
+        body_layout.addWidget(self.splitter, 1)
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setMinimumWidth(320)
+        self.sidebar.setMaximumWidth(360)
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(18, 18, 18, 16)
         sidebar_layout.setSpacing(14)
@@ -329,15 +397,17 @@ class MainWindow(QMainWindow):
 
         self.work_panel = QFrame()
         self.work_panel.setObjectName("WorkPanel")
+        self.work_panel.setMinimumWidth(760)
         work_layout = QVBoxLayout(self.work_panel)
-        work_layout.setContentsMargins(24, 22, 24, 22)
-        work_layout.setSpacing(18)
+        work_layout.setContentsMargins(22, 20, 22, 20)
+        work_layout.setSpacing(16)
 
         self.workspace_header = QHBoxLayout()
         self.workspace_header.setSpacing(12)
         self.paper_icon_label = QLabel()
         self.paper_icon_label.setObjectName("PaperIcon")
         self.paper_icon_label.setPixmap(self._make_icon("file", "#2563EB").pixmap(QSize(22, 22)))
+        self.paper_icon_label.setFixedSize(32, 32)
         heading_box = QVBoxLayout()
         heading_box.setSpacing(5)
         self.paper_title_label = QLabel("选择或上传一篇论文")
@@ -349,16 +419,23 @@ class MainWindow(QMainWindow):
 
         self.project_status_badge = QLabel("未选择")
         self.project_status_badge.setObjectName("StatusBadge")
+        self.more_button = QPushButton()
+        self.more_button.setObjectName("IconButton")
+        self.more_button.setIcon(self._make_icon("more", "#475569"))
+        self.more_button.setIconSize(QSize(18, 18))
+        self.more_button.setToolTip("更多")
 
         self.workspace_header.addWidget(self.paper_icon_label)
         self.workspace_header.addLayout(heading_box, 1)
         self.workspace_header.addWidget(self.project_status_badge)
+        self.workspace_header.addWidget(self.more_button)
 
         upload_box = QFrame()
         upload_box.setObjectName("UploadBox")
+        upload_box.setMinimumHeight(156)
         upload_layout = QVBoxLayout(upload_box)
-        upload_layout.setContentsMargins(24, 22, 24, 22)
-        upload_layout.setSpacing(10)
+        upload_layout.setContentsMargins(26, 18, 26, 18)
+        upload_layout.setSpacing(8)
         upload_top = QHBoxLayout()
         upload_top.addStretch(1)
         self.upload_button = QPushButton("上传论文 PDF")
@@ -378,6 +455,8 @@ class MainWindow(QMainWindow):
         self.selected_pdf_label = QLabel("尚未选择 PDF")
         self.selected_pdf_label.setObjectName("FileCard")
         self.selected_pdf_label.setAlignment(Qt.AlignCenter)
+        self.selected_pdf_label.setWordWrap(True)
+        self.selected_pdf_label.setMinimumHeight(42)
         upload_layout.addLayout(upload_top)
         upload_layout.addWidget(upload_hint)
         upload_layout.addWidget(upload_format_hint)
@@ -386,7 +465,7 @@ class MainWindow(QMainWindow):
         workflow_title = QLabel("论文处理工作流")
         workflow_title.setObjectName("SectionTitle")
         workflow_row = QHBoxLayout()
-        workflow_row.setSpacing(14)
+        workflow_row.setSpacing(12)
         self.workflow_badge_parse = QLabel("待处理")
         self.workflow_badge_terms = QLabel("待处理")
         self.workflow_badge_output = QLabel("待处理")
@@ -434,13 +513,18 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
         progress_actions = QHBoxLayout()
+        progress_actions.setSpacing(10)
         self.translate_button = QPushButton(self.translate_text)
         self.translate_button.setObjectName("PrimaryButton")
         self.translate_button.setMinimumHeight(44)
+        self.translate_button.setIcon(self._make_icon("file", "#FFFFFF"))
+        self.translate_button.setIconSize(QSize(18, 18))
         self.translate_button.clicked.connect(lambda: self.generate_outputs("translation"))
         self.summary_button = QPushButton(self.summary_text)
         self.summary_button.setObjectName("SecondaryActionButton")
         self.summary_button.setMinimumHeight(44)
+        self.summary_button.setIcon(self._make_icon("info", "#FFFFFF"))
+        self.summary_button.setIconSize(QSize(18, 18))
         self.summary_button.clicked.connect(lambda: self.generate_outputs("summary"))
         progress_actions.addWidget(self.translate_button)
         progress_actions.addWidget(self.summary_button)
@@ -477,12 +561,13 @@ class MainWindow(QMainWindow):
 
         self.preview_panel = QFrame()
         self.preview_panel.setObjectName("PreviewCard")
+        self.preview_panel.setMinimumWidth(620)
         preview_layout = QVBoxLayout(self.preview_panel)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
 
         self.preview_header_layout = QHBoxLayout()
-        self.preview_header_layout.setContentsMargins(18, 12, 18, 0)
+        self.preview_header_layout.setContentsMargins(18, 14, 18, 10)
         self.preview_header_layout.setSpacing(8)
         self.preview_tab_pdf = QPushButton("原论文预览")
         self.preview_tab_translation = QPushButton("中文译文.md")
@@ -529,11 +614,15 @@ class MainWindow(QMainWindow):
 
         self.workspace_splitter.addWidget(self.work_panel)
         self.workspace_splitter.addWidget(self.preview_panel)
-        self.workspace_splitter.setSizes([620, 520])
+        self.workspace_splitter.setStretchFactor(0, 6)
+        self.workspace_splitter.setStretchFactor(1, 5)
+        self.workspace_splitter.setSizes([820, 720])
 
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(content)
-        self.splitter.setSizes([290, 1180])
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([336, 1240])
 
         self.setStatusBar(QStatusBar())
         self.statusBar().hide()
@@ -541,23 +630,28 @@ class MainWindow(QMainWindow):
         self._append_log("等待选择论文或上传 PDF。")
 
     def _make_arrow_label(self) -> QLabel:
-        arrow = QLabel("›")
+        arrow = QLabel()
         arrow.setObjectName("WorkflowArrow")
+        arrow.setPixmap(self._make_icon("chevron", "#64748B").pixmap(QSize(22, 22)))
         arrow.setAlignment(Qt.AlignCenter)
+        arrow.setFixedWidth(34)
         return arrow
 
     def _make_workflow_card(self, number: str, title: str, body: str, badge: QLabel) -> QFrame:
         card = QFrame()
         card.setObjectName("WorkflowCard")
+        card.setMinimumHeight(128)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(8)
 
         header = QHBoxLayout()
         number_label = QLabel(number)
         number_label.setObjectName("StepNumber")
+        number_label.setFixedSize(24, 24)
         title_label = QLabel(title)
         title_label.setObjectName("WorkflowTitle")
+        title_label.setWordWrap(True)
         header.addWidget(number_label)
         header.addWidget(title_label, 1)
 
@@ -565,6 +659,7 @@ class MainWindow(QMainWindow):
         body_label.setObjectName("WorkflowBody")
         body_label.setWordWrap(True)
         badge.setObjectName("WorkflowBadge")
+        badge.setFixedHeight(24)
 
         layout.addLayout(header)
         layout.addWidget(body_label, 1)
@@ -576,7 +671,7 @@ class MainWindow(QMainWindow):
             """
             QWidget {
                 font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-                font-size: 14px;
+                font-size: 13px;
                 color: #334155;
                 background: #F7F9FC;
             }
@@ -588,6 +683,24 @@ class MainWindow(QMainWindow):
             }
             QFrame#AppShell {
                 background: #F7F9FC;
+            }
+            QFrame#TopBar {
+                background: #FFFFFF;
+                border-bottom: 1px solid #E2E8F0;
+            }
+            QFrame#Body {
+                background: #F7F9FC;
+            }
+            QLabel#AppIcon {
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+            }
+            QLabel#TopBarTitle {
+                color: #111827;
+                font-size: 15px;
+                font-weight: 700;
             }
             QFrame#SidebarRail {
                 background: #F7F9FC;
@@ -642,7 +755,7 @@ class MainWindow(QMainWindow):
                 color: #111827;
             }
             QLabel#PaperTitle {
-                font-size: 18px;
+                font-size: 16px;
                 font-weight: 700;
                 color: #111827;
             }
@@ -658,7 +771,7 @@ class MainWindow(QMainWindow):
                 qproperty-alignment: AlignCenter;
             }
             QLabel#SectionTitle {
-                font-size: 16px;
+                font-size: 15px;
                 font-weight: 700;
                 color: #111827;
             }
@@ -690,16 +803,17 @@ class MainWindow(QMainWindow):
             }
             QLabel#CardTitle {
                 color: #111827;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: 700;
             }
             QLabel#WorkflowTitle {
                 color: #111827;
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: 700;
             }
             QLabel#WorkflowBody {
                 color: #475569;
+                font-size: 12px;
                 line-height: 1.5;
             }
             QLabel#WorkflowArrow {
@@ -765,12 +879,12 @@ class MainWindow(QMainWindow):
                 letter-spacing: 0px;
             }
             QLabel#FileCard {
-                padding: 18px 22px;
+                padding: 8px 14px;
                 background: #F8FAFC;
                 border: 1px solid #E2E8F0;
-                border-radius: 12px;
+                border-radius: 10px;
                 color: #334155;
-                font-size: 15px;
+                font-size: 12px;
             }
             QTextBrowser#PreviewPanel {
                 padding: 26px;
@@ -795,7 +909,7 @@ class MainWindow(QMainWindow):
                 color: #334155;
             }
             QTreeWidget::item {
-                min-height: 38px;
+                min-height: 34px;
                 padding: 8px 12px;
                 border-radius: 8px;
             }
@@ -811,7 +925,7 @@ class MainWindow(QMainWindow):
                 width: 0px;
             }
             QPushButton {
-                min-height: 40px;
+                min-height: 36px;
                 padding: 9px 18px;
                 border-radius: 8px;
                 border: 1px solid #E2E8F0;
@@ -845,11 +959,12 @@ class MainWindow(QMainWindow):
                 background: #F1F5F9;
             }
             QPushButton#SidebarAction {
-                min-height: 42px;
-                padding: 8px 10px;
+                min-height: 34px;
+                padding: 6px 8px;
                 background: #F8FAFC;
                 color: #334155;
                 border: 1px solid #E2E8F0;
+                font-size: 12px;
             }
             QPushButton#OutlineButton {
                 background: #2563EB;
@@ -861,6 +976,7 @@ class MainWindow(QMainWindow):
                 border-color: #1D4ED8;
             }
             QPushButton#PrimaryButton {
+                min-width: 112px;
                 background: #2563EB;
                 color: #FFFFFF;
                 border: 1px solid #2563EB;
@@ -874,6 +990,7 @@ class MainWindow(QMainWindow):
                 border-color: #1E40AF;
             }
             QPushButton#SecondaryActionButton {
+                min-width: 140px;
                 background: #2563EB;
                 color: #FFFFFF;
                 border: 1px solid #2563EB;
@@ -924,11 +1041,12 @@ class MainWindow(QMainWindow):
             }
             QPushButton#PreviewTabButton {
                 min-width: 118px;
-                min-height: 38px;
-                border-radius: 8px 8px 0px 0px;
+                min-height: 42px;
+                border-radius: 8px;
                 border: 1px solid transparent;
                 background: #F5F7FA;
                 color: #475569;
+                font-size: 13px;
             }
             QPushButton#PreviewTabButton:checked {
                 background: #FFFFFF;
@@ -954,10 +1072,38 @@ class MainWindow(QMainWindow):
                 min-height: 34px;
                 padding: 6px 12px;
             }
+            QPushButton#IconButton {
+                min-width: 34px;
+                max-width: 34px;
+                min-height: 34px;
+                max-height: 34px;
+                padding: 0px;
+                border: 1px solid transparent;
+                background: #FFFFFF;
+            }
+            QPushButton#IconButton:hover {
+                background: #F1F5F9;
+            }
             QLabel#DialogTitle {
                 color: #111827;
                 font-size: 18px;
                 font-weight: 700;
+            }
+            QLabel#DialogKeyIcon {
+                min-width: 40px;
+                max-width: 40px;
+                min-height: 40px;
+                max-height: 40px;
+                border-radius: 20px;
+                background: #DBEAFE;
+                qproperty-alignment: AlignCenter;
+            }
+            QLabel#InfoBox {
+                color: #64748B;
+                background: #EFF6FF;
+                border: 1px solid #BFDBFE;
+                border-radius: 8px;
+                padding: 9px 12px;
             }
             """
         )
@@ -1397,7 +1543,7 @@ class MainWindow(QMainWindow):
         if path is None:
             self.selected_pdf_label.setText("尚未选择 PDF")
             return
-        self.selected_pdf_label.setText(f"PDF 论文\n{path.name}\n{path}")
+        self.selected_pdf_label.setText(f"{path.name}  |  {path.parent}")
 
     def _update_work_panel_for_paper(self, paper: PaperRecord | None) -> None:
         self.current_paper = paper
@@ -1589,8 +1735,22 @@ class MainWindow(QMainWindow):
             [QUrl.fromLocalFile(str(path)) for path in sidebar_paths if path.exists()]
         )
         if dialog.exec() == QFileDialog.Accepted and dialog.selectedFiles():
-            self.current_pdf = Path(dialog.selectedFiles()[0])
+            selected_pdf = Path(dialog.selectedFiles()[0])
+            if self.current_folder is None:
+                self.current_folder = self.library.list_folders()[0]
+            try:
+                _title, paper_dir, original_pdf = _prepare_paper_workspace(
+                    selected_pdf,
+                    self.current_folder.path,
+                    lambda _msg, _value: None,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "上传失败", str(exc))
+                return
+            self.current_pdf = original_pdf
             self._set_selected_pdf_label(self.current_pdf)
+            self._append_log(f"已上传论文 PDF：{original_pdf.name}")
+            self.refresh_folders(preferred_path=paper_dir)
 
     def _enter_processing_state(self, action: str) -> None:
         self.active_action = action
