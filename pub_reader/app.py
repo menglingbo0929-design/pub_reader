@@ -6,10 +6,14 @@ import shutil
 import sys
 import threading
 import html
+import json
+import ctypes
+from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -46,19 +50,34 @@ INVALID_NAME_RE = re.compile(r'[<>:"/\\|?*]+')
 class ApiKeyDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("输入 DeepSeek API key")
+        self.setWindowTitle("接入 DeepSeek API Key")
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(500)
 
         layout = QVBoxLayout(self)
-        title = QLabel("DeepSeek API key")
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        title = QLabel("接入 DeepSeek API Key")
         title.setObjectName("DialogTitle")
+        intro = QLabel("应用将调用 DeepSeek-V4-Pro 模型，为论文生成中文译文 Markdown 和总结 Markdown。")
+        intro.setObjectName("HelperText")
+        intro.setWordWrap(True)
+
+        model_label = QLabel("模型")
+        model_label.setObjectName("FieldLabel")
+        self.model_input = QLineEdit("DeepSeek-V4-Pro")
+        self.model_input.setReadOnly(True)
+        self.model_input.setObjectName("ReadOnlyInput")
+        self.model_input.setMinimumHeight(40)
+
+        key_label = QLabel("API Key")
+        key_label.setObjectName("FieldLabel")
         self.input = QLineEdit()
         self.input.setEchoMode(QLineEdit.Password)
         self.input.setPlaceholderText("sk-...")
         self.input.setMinimumHeight(44)
 
-        helper = QLabel("密钥只用于本次生成请求，不会写入项目代码。")
+        helper = QLabel("你的 API Key 仅用于当前本地任务，不会上传或写入项目代码。")
         helper.setObjectName("HelperText")
 
         buttons = QHBoxLayout()
@@ -72,8 +91,14 @@ class ApiKeyDialog(QDialog):
         buttons.addWidget(confirm)
 
         layout.addWidget(title)
+        layout.addWidget(intro)
+        layout.addSpacing(4)
+        layout.addWidget(model_label)
+        layout.addWidget(self.model_input)
+        layout.addWidget(key_label)
         layout.addWidget(self.input)
         layout.addWidget(helper)
+        layout.addSpacing(8)
         layout.addLayout(buttons)
 
     @property
@@ -142,6 +167,11 @@ class MainWindow(QMainWindow):
         self.summary_text = "生成 Summary"
         self.sidebar_visible = True
         self.last_sidebar_width = 300
+        self.current_paper: PaperRecord | None = None
+        self.current_preview_tab = "pdf"
+        self.detail_mode = False
+        self.log_entries: list[tuple[str, str]] = []
+        self.last_progress_message = ""
 
         self.setWindowTitle("Pub Reader")
         self.setMinimumSize(1120, 720)
@@ -149,6 +179,57 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_style()
         self.refresh_folders()
+
+    def _make_icon(self, kind: str, color: str = "#64748B") -> QIcon:
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(color), 1.8)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        if kind == "folder":
+            painter.setBrush(QColor(color))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(3, 7, 16, 11, 2.5, 2.5)
+            painter.drawRoundedRect(4, 5, 7, 4, 2, 2)
+        elif kind == "file":
+            painter.drawRoundedRect(5, 3, 12, 16, 2, 2)
+            painter.drawLine(12, 3, 17, 8)
+            painter.drawLine(12, 3, 12, 8)
+            painter.drawLine(12, 8, 17, 8)
+            painter.drawLine(8, 12, 14, 12)
+            painter.drawLine(8, 15, 14, 15)
+        elif kind == "upload":
+            painter.drawArc(4, 8, 14, 8, 20 * 16, 140 * 16)
+            painter.drawLine(11, 14, 11, 5)
+            painter.drawLine(8, 8, 11, 5)
+            painter.drawLine(14, 8, 11, 5)
+        elif kind == "refresh":
+            painter.drawArc(5, 5, 12, 12, 30 * 16, 260 * 16)
+            painter.drawLine(15, 4, 17, 8)
+            painter.drawLine(15, 4, 11, 5)
+        elif kind == "edit":
+            painter.drawLine(6, 16, 15, 7)
+            painter.drawLine(14, 6, 16, 8)
+            painter.drawLine(5, 17, 9, 16)
+        elif kind == "trash":
+            painter.drawLine(7, 8, 15, 8)
+            painter.drawRect(8, 9, 6, 8)
+            painter.drawLine(9, 6, 13, 6)
+            painter.drawLine(10, 11, 10, 15)
+            painter.drawLine(12, 11, 12, 15)
+        elif kind == "menu":
+            painter.drawLine(5, 7, 17, 7)
+            painter.drawLine(5, 11, 17, 11)
+            painter.drawLine(5, 15, 17, 15)
+        elif kind == "expand":
+            painter.drawLine(7, 15, 15, 7)
+            painter.drawLine(10, 7, 15, 7)
+            painter.drawLine(15, 7, 15, 12)
+        painter.end()
+        return QIcon(pixmap)
 
     def _build_ui(self) -> None:
         root = QFrame()
@@ -160,10 +241,20 @@ class MainWindow(QMainWindow):
 
         self.sidebar_toggle_button = QPushButton()
         self.sidebar_toggle_button.setObjectName("SidebarToggle")
-        self.sidebar_toggle_button.setText("☰")
+        self.sidebar_toggle_button.setIcon(self._make_icon("menu", "#475569"))
+        self.sidebar_toggle_button.setIconSize(QSize(22, 22))
         self.sidebar_toggle_button.setToolTip("展开/收起目录")
         self.sidebar_toggle_button.setMinimumSize(44, 44)
         self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
+
+        self.sidebar_rail = QFrame()
+        self.sidebar_rail.setObjectName("SidebarRail")
+        self.sidebar_rail_layout = QVBoxLayout(self.sidebar_rail)
+        self.sidebar_rail_layout.setContentsMargins(10, 18, 10, 10)
+        self.sidebar_rail_layout.setSpacing(10)
+        self.sidebar_rail_layout.addStretch(1)
+        self.sidebar_rail.hide()
+        root_layout.addWidget(self.sidebar_rail)
 
         self.splitter = QSplitter(Qt.Horizontal)
         root_layout.addWidget(self.splitter, 1)
@@ -171,18 +262,21 @@ class MainWindow(QMainWindow):
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
         sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(16, 18, 16, 16)
-        sidebar_layout.setSpacing(16)
+        sidebar_layout.setContentsMargins(18, 18, 18, 16)
+        sidebar_layout.setSpacing(14)
 
         self.sidebar_header = QHBoxLayout()
         self.sidebar_header.setSpacing(10)
-        app_title = QLabel("Pub Reader")
+        app_title = QLabel("项目")
         app_title.setObjectName("AppTitle")
         self.sidebar_header.addWidget(app_title, 1)
         self.sidebar_header.addWidget(self.sidebar_toggle_button)
 
-        subtitle = QLabel("英文论文中文阅读工作台")
-        subtitle.setObjectName("Subtitle")
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("SearchInput")
+        self.search_input.setPlaceholderText("搜索项目或文件...")
+        self.search_input.textChanged.connect(lambda _text: self.refresh_folders())
+
         self.library_tree = QTreeWidget()
         self.library_tree.setHeaderHidden(True)
         self.library_tree.setIndentation(18)
@@ -192,48 +286,154 @@ class MainWindow(QMainWindow):
         self.library_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
 
         folder_buttons = QHBoxLayout()
-        new_folder = QPushButton("新建")
+        folder_buttons.setSpacing(8)
+        new_folder = QPushButton("新建文件夹")
+        refresh_folder = QPushButton("刷新")
         rename_folder = QPushButton("重命名")
         delete_folder = QPushButton("删除")
         new_folder.setObjectName("SidebarAction")
+        refresh_folder.setObjectName("SidebarAction")
         rename_folder.setObjectName("SidebarAction")
         delete_folder.setObjectName("SidebarAction")
+        for button, icon_name, icon_color in [
+            (new_folder, "folder", "#2563EB"),
+            (refresh_folder, "refresh", "#EF4444"),
+            (rename_folder, "edit", "#2563EB"),
+            (delete_folder, "trash", "#64748B"),
+        ]:
+            button.setIcon(self._make_icon(icon_name, icon_color))
+            button.setIconSize(QSize(16, 16))
         new_folder.clicked.connect(self.create_folder)
+        refresh_folder.clicked.connect(self.refresh_folders)
         rename_folder.clicked.connect(self.rename_folder)
         delete_folder.clicked.connect(self.delete_folder)
         folder_buttons.addWidget(new_folder)
+        folder_buttons.addWidget(refresh_folder)
         folder_buttons.addWidget(rename_folder)
         folder_buttons.addWidget(delete_folder)
 
         sidebar_layout.addLayout(self.sidebar_header)
-        sidebar_layout.addWidget(subtitle)
-        folder_label = QLabel("文件夹")
-        folder_label.setObjectName("SectionLabel")
-        sidebar_layout.addWidget(folder_label)
-        sidebar_layout.addWidget(self.library_tree, 1)
+        sidebar_layout.addWidget(self.search_input)
         sidebar_layout.addLayout(folder_buttons)
+        sidebar_layout.addWidget(self.library_tree, 1)
 
         content = QFrame()
         content.setObjectName("Content")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(34, 28, 34, 28)
-        content_layout.setSpacing(18)
+        content_layout.setContentsMargins(14, 14, 14, 14)
+        content_layout.setSpacing(0)
+
+        self.workspace_splitter = QSplitter(Qt.Horizontal)
+        self.workspace_splitter.setObjectName("WorkspaceSplitter")
+        content_layout.addWidget(self.workspace_splitter, 1)
+
+        self.work_panel = QFrame()
+        self.work_panel.setObjectName("WorkPanel")
+        work_layout = QVBoxLayout(self.work_panel)
+        work_layout.setContentsMargins(24, 22, 24, 22)
+        work_layout.setSpacing(18)
 
         self.workspace_header = QHBoxLayout()
-        self.workspace_header.setSpacing(14)
+        self.workspace_header.setSpacing(12)
+        self.paper_icon_label = QLabel()
+        self.paper_icon_label.setObjectName("PaperIcon")
+        self.paper_icon_label.setPixmap(self._make_icon("file", "#2563EB").pixmap(QSize(22, 22)))
         heading_box = QVBoxLayout()
-        heading_box.setSpacing(6)
-        heading = QLabel("论文处理")
-        heading.setObjectName("PageTitle")
+        heading_box.setSpacing(5)
+        self.paper_title_label = QLabel("选择或上传一篇论文")
+        self.paper_title_label.setObjectName("PaperTitle")
         self.folder_label = QLabel("请选择或新建一个文件夹")
         self.folder_label.setObjectName("HelperText")
-        heading_box.addWidget(heading)
+        heading_box.addWidget(self.paper_title_label)
         heading_box.addWidget(self.folder_label)
 
-        self.upload_button = QPushButton("选择 PDF")
+        self.project_status_badge = QLabel("未选择")
+        self.project_status_badge.setObjectName("StatusBadge")
+
+        self.workspace_header.addWidget(self.paper_icon_label)
+        self.workspace_header.addLayout(heading_box, 1)
+        self.workspace_header.addWidget(self.project_status_badge)
+
+        upload_box = QFrame()
+        upload_box.setObjectName("UploadBox")
+        upload_layout = QVBoxLayout(upload_box)
+        upload_layout.setContentsMargins(24, 22, 24, 22)
+        upload_layout.setSpacing(10)
+        upload_top = QHBoxLayout()
+        upload_top.addStretch(1)
+        self.upload_button = QPushButton("上传论文 PDF")
         self.upload_button.setObjectName("OutlineButton")
         self.upload_button.setMinimumHeight(44)
+        self.upload_button.setIcon(self._make_icon("upload", "#FFFFFF"))
+        self.upload_button.setIconSize(QSize(18, 18))
         self.upload_button.clicked.connect(self.choose_pdf)
+        upload_top.addWidget(self.upload_button)
+        upload_top.addStretch(1)
+        upload_hint = QLabel("将 PDF 文件拖拽至此，或点击按钮上传")
+        upload_hint.setObjectName("HelperText")
+        upload_hint.setAlignment(Qt.AlignCenter)
+        upload_format_hint = QLabel("支持 .pdf 格式；生成结果会保存到当前文件夹")
+        upload_format_hint.setObjectName("MutedText")
+        upload_format_hint.setAlignment(Qt.AlignCenter)
+        self.selected_pdf_label = QLabel("尚未选择 PDF")
+        self.selected_pdf_label.setObjectName("FileCard")
+        self.selected_pdf_label.setAlignment(Qt.AlignCenter)
+        upload_layout.addLayout(upload_top)
+        upload_layout.addWidget(upload_hint)
+        upload_layout.addWidget(upload_format_hint)
+        upload_layout.addWidget(self.selected_pdf_label)
+
+        workflow_title = QLabel("论文处理工作流")
+        workflow_title.setObjectName("SectionTitle")
+        workflow_row = QHBoxLayout()
+        workflow_row.setSpacing(14)
+        self.workflow_badge_parse = QLabel("待处理")
+        self.workflow_badge_terms = QLabel("待处理")
+        self.workflow_badge_output = QLabel("待处理")
+        workflow_row.addWidget(
+            self._make_workflow_card(
+                "1",
+                "解析论文结构",
+                "Abstract / Introduction / Methods / Experiments / Tables / Figures",
+                self.workflow_badge_parse,
+            )
+        )
+        workflow_row.addWidget(self._make_arrow_label())
+        workflow_row.addWidget(
+            self._make_workflow_card(
+                "2",
+                "领域术语与术语翻译",
+                "读取 abstract/introduction，判断领域并构建术语表",
+                self.workflow_badge_terms,
+            )
+        )
+        workflow_row.addWidget(self._make_arrow_label())
+        workflow_row.addWidget(
+            self._make_workflow_card(
+                "3",
+                "生成输出",
+                "中文译文 Markdown 与 Summary Markdown",
+                self.workflow_badge_output,
+            )
+        )
+
+        progress_card = QFrame()
+        progress_card.setObjectName("ProgressCard")
+        progress_layout = QVBoxLayout(progress_card)
+        progress_layout.setContentsMargins(18, 16, 18, 16)
+        progress_layout.setSpacing(12)
+        progress_header = QHBoxLayout()
+        progress_title = QLabel("生成进度")
+        progress_title.setObjectName("CardTitle")
+        self.progress_status_label = QLabel("就绪")
+        self.progress_status_label.setObjectName("ProgressStatus")
+        progress_header.addWidget(progress_title, 1)
+        progress_header.addWidget(self.progress_status_label)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        progress_actions = QHBoxLayout()
         self.translate_button = QPushButton(self.translate_text)
         self.translate_button.setObjectName("PrimaryButton")
         self.translate_button.setMinimumHeight(44)
@@ -242,51 +442,77 @@ class MainWindow(QMainWindow):
         self.summary_button.setObjectName("SecondaryActionButton")
         self.summary_button.setMinimumHeight(44)
         self.summary_button.clicked.connect(lambda: self.generate_outputs("summary"))
+        progress_actions.addWidget(self.translate_button)
+        progress_actions.addWidget(self.summary_button)
+        progress_actions.addStretch(1)
+        progress_layout.addLayout(progress_header)
+        progress_layout.addWidget(self.progress)
+        progress_layout.addLayout(progress_actions)
 
-        self.workspace_header.addLayout(heading_box, 1)
-        self.workspace_header.addWidget(self.upload_button)
-        self.workspace_header.addWidget(self.translate_button)
-        self.workspace_header.addWidget(self.summary_button)
+        log_card = QFrame()
+        log_card.setObjectName("LogCard")
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(18, 16, 18, 16)
+        log_layout.setSpacing(10)
+        log_header = QHBoxLayout()
+        log_title = QLabel("活动日志")
+        log_title.setObjectName("CardTitle")
+        clear_log = QPushButton("清空日志")
+        clear_log.setObjectName("GhostButton")
+        clear_log.clicked.connect(self.clear_activity_log)
+        log_header.addWidget(log_title, 1)
+        log_header.addWidget(clear_log)
+        self.activity_log = QTextBrowser()
+        self.activity_log.setObjectName("ActivityLog")
+        self.activity_log.setOpenExternalLinks(False)
+        log_layout.addLayout(log_header)
+        log_layout.addWidget(self.activity_log, 1)
 
-        self.selected_pdf_label = QLabel("尚未选择 PDF")
-        self.selected_pdf_label.setObjectName("FileCard")
+        work_layout.addLayout(self.workspace_header)
+        work_layout.addWidget(upload_box)
+        work_layout.addWidget(workflow_title)
+        work_layout.addLayout(workflow_row)
+        work_layout.addWidget(progress_card)
+        work_layout.addWidget(log_card, 1)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-
-        progress_card = QFrame()
-        progress_card.setObjectName("ProgressCard")
-        progress_layout = QHBoxLayout(progress_card)
-        progress_layout.setContentsMargins(18, 14, 18, 14)
-        progress_layout.setSpacing(14)
-        self.progress_status_label = QLabel("就绪")
-        self.progress_status_label.setObjectName("ProgressStatus")
-        progress_layout.addWidget(self.progress, 1)
-        progress_layout.addWidget(self.progress_status_label)
-
-        preview_shell = QFrame()
-        preview_shell.setObjectName("PreviewCard")
-        preview_layout = QVBoxLayout(preview_shell)
+        self.preview_panel = QFrame()
+        self.preview_panel.setObjectName("PreviewCard")
+        preview_layout = QVBoxLayout(self.preview_panel)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
 
-        preview_toolbar = QFrame()
-        preview_toolbar.setObjectName("PreviewToolbar")
-        preview_toolbar_layout = QHBoxLayout(preview_toolbar)
-        preview_toolbar_layout.setContentsMargins(18, 0, 18, 0)
-        preview_toolbar_layout.setSpacing(22)
-        active_tab = QLabel("原文 / PDF")
-        active_tab.setObjectName("ActiveTab")
-        translated_tab = QLabel("译文 / Markdown")
-        translated_tab.setObjectName("PreviewTab")
-        summary_tab = QLabel("Summary")
-        summary_tab.setObjectName("PreviewTab")
-        preview_toolbar_layout.addWidget(active_tab)
-        preview_toolbar_layout.addWidget(translated_tab)
-        preview_toolbar_layout.addWidget(summary_tab)
-        preview_toolbar_layout.addStretch(1)
+        self.preview_header_layout = QHBoxLayout()
+        self.preview_header_layout.setContentsMargins(18, 12, 18, 0)
+        self.preview_header_layout.setSpacing(8)
+        self.preview_tab_pdf = QPushButton("原论文预览")
+        self.preview_tab_translation = QPushButton("中文译文.md")
+        self.preview_tab_summary = QPushButton("Summary.md")
+        for tab, name in [
+            (self.preview_tab_pdf, "pdf"),
+            (self.preview_tab_translation, "translation"),
+            (self.preview_tab_summary, "summary"),
+        ]:
+            tab.setObjectName("PreviewTabButton")
+            tab.setCheckable(True)
+            tab.clicked.connect(lambda checked=False, value=name: self.set_preview_tab(value))
+            self.preview_header_layout.addWidget(tab)
+        self.preview_header_layout.addStretch(1)
+        self.preview_meta_label = QLabel("")
+        self.preview_meta_label.setObjectName("PreviewMeta")
+        self.preview_header_layout.addWidget(self.preview_meta_label)
+        self.detail_button = QPushButton("↗")
+        self.detail_button.setObjectName("DetailButton")
+        self.detail_button.setToolTip("进入详情阅读页")
+        self.detail_button.setIcon(self._make_icon("expand", "#334155"))
+        self.detail_button.setIconSize(QSize(18, 18))
+        self.detail_button.setText("")
+        self.detail_button.clicked.connect(self.enter_detail_mode)
+        self.close_detail_button = QPushButton("关闭详情页")
+        self.close_detail_button.setObjectName("GhostButton")
+        self.close_detail_button.clicked.connect(self.exit_detail_mode)
+        self.close_detail_button.hide()
+        self.preview_header_layout.addWidget(self.detail_button)
+        self.preview_header_layout.addWidget(self.close_detail_button)
 
         self.detail = QTextBrowser()
         self.detail.setObjectName("PreviewPanel")
@@ -298,19 +524,52 @@ class MainWindow(QMainWindow):
             "<p>选择左侧论文或导入 PDF 后，PDF、译文 Markdown 和 Summary 会在这里直接预览。</p>"
         )
 
-        preview_layout.addWidget(preview_toolbar)
+        preview_layout.addLayout(self.preview_header_layout)
         preview_layout.addWidget(self.detail, 1)
 
-        content_layout.addLayout(self.workspace_header)
-        content_layout.addWidget(self.selected_pdf_label)
-        content_layout.addWidget(progress_card)
-        content_layout.addWidget(preview_shell, 1)
+        self.workspace_splitter.addWidget(self.work_panel)
+        self.workspace_splitter.addWidget(self.preview_panel)
+        self.workspace_splitter.setSizes([620, 520])
 
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(content)
-        self.splitter.setSizes([280, 980])
+        self.splitter.setSizes([290, 1180])
 
         self.setStatusBar(QStatusBar())
+        self.statusBar().hide()
+        self._sync_preview_tabs()
+        self._append_log("等待选择论文或上传 PDF。")
+
+    def _make_arrow_label(self) -> QLabel:
+        arrow = QLabel("›")
+        arrow.setObjectName("WorkflowArrow")
+        arrow.setAlignment(Qt.AlignCenter)
+        return arrow
+
+    def _make_workflow_card(self, number: str, title: str, body: str, badge: QLabel) -> QFrame:
+        card = QFrame()
+        card.setObjectName("WorkflowCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        number_label = QLabel(number)
+        number_label.setObjectName("StepNumber")
+        title_label = QLabel(title)
+        title_label.setObjectName("WorkflowTitle")
+        header.addWidget(number_label)
+        header.addWidget(title_label, 1)
+
+        body_label = QLabel(body)
+        body_label.setObjectName("WorkflowBody")
+        body_label.setWordWrap(True)
+        badge.setObjectName("WorkflowBadge")
+
+        layout.addLayout(header)
+        layout.addWidget(body_label, 1)
+        layout.addWidget(badge)
+        return card
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -318,23 +577,50 @@ class MainWindow(QMainWindow):
             QWidget {
                 font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
                 font-size: 14px;
-                color: #141A22;
-                background: #F5F7FA;
+                color: #334155;
+                background: #F7F9FC;
+            }
+            QMainWindow, QDialog {
+                background: #F7F9FC;
             }
             QLabel {
                 background: transparent;
             }
             QFrame#AppShell {
-                background: #FFFFFF;
+                background: #F7F9FC;
+            }
+            QFrame#SidebarRail {
+                background: #F7F9FC;
+                border-right: 1px solid #E2E8F0;
             }
             QFrame#Sidebar {
-                background: #FAFAFB;
-                border-right: 1px solid #E5E7EB;
+                background: #FFFFFF;
+                border-right: 1px solid #E2E8F0;
             }
             QFrame#Content {
-                background: #FBFCFD;
+                background: #F7F9FC;
+            }
+            QFrame#WorkPanel {
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 12px;
+            }
+            QFrame#UploadBox {
+                background: #FFFFFF;
+                border: 1px dashed #CBD5E1;
+                border-radius: 12px;
+            }
+            QFrame#WorkflowCard {
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 10px;
             }
             QFrame#ProgressCard {
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 12px;
+            }
+            QFrame#LogCard {
                 background: #FFFFFF;
                 border: 1px solid #E2E8F0;
                 border-radius: 12px;
@@ -351,26 +637,37 @@ class MainWindow(QMainWindow):
                 border-bottom: 1px solid #E2E8F0;
             }
             QLabel#AppTitle {
-                font-size: 24px;
+                font-size: 18px;
                 font-weight: 700;
-                color: #0F172A;
+                color: #111827;
             }
-            QLabel#PageTitle {
-                font-size: 29px;
+            QLabel#PaperTitle {
+                font-size: 18px;
                 font-weight: 700;
-                color: #0F172A;
+                color: #111827;
+            }
+            QLabel#PaperIcon {
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
+                border-radius: 8px;
+                background: #DBEAFE;
+                color: #2563EB;
+                font-size: 18px;
+                qproperty-alignment: AlignCenter;
             }
             QLabel#SectionTitle {
                 font-size: 16px;
                 font-weight: 700;
-                color: #0F172A;
+                color: #111827;
             }
             QLabel#ActiveTab {
                 min-height: 58px;
-                color: #0F766E;
+                color: #2563EB;
                 font-size: 14px;
                 font-weight: 700;
-                border-bottom: 3px solid #0F766E;
+                border-bottom: 3px solid #2563EB;
             }
             QLabel#PreviewTab {
                 min-height: 58px;
@@ -381,11 +678,85 @@ class MainWindow(QMainWindow):
             QLabel#Subtitle, QLabel#HelperText {
                 color: #64748B;
             }
+            QLabel#MutedText {
+                color: #64748B;
+                font-size: 13px;
+            }
             QLabel#SectionLabel {
                 color: #475569;
                 font-size: 12px;
                 font-weight: 700;
                 padding-top: 4px;
+            }
+            QLabel#CardTitle {
+                color: #111827;
+                font-size: 15px;
+                font-weight: 700;
+            }
+            QLabel#WorkflowTitle {
+                color: #111827;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QLabel#WorkflowBody {
+                color: #475569;
+                line-height: 1.5;
+            }
+            QLabel#WorkflowArrow {
+                color: #64748B;
+                font-size: 28px;
+                min-width: 22px;
+                max-width: 22px;
+            }
+            QLabel#StepNumber {
+                min-width: 24px;
+                max-width: 24px;
+                min-height: 24px;
+                max-height: 24px;
+                border-radius: 12px;
+                background: #2563EB;
+                color: #FFFFFF;
+                font-weight: 700;
+                qproperty-alignment: AlignCenter;
+            }
+            QLabel#WorkflowBadge, QLabel#StatusBadge {
+                color: #64748B;
+                background: #F1F5F9;
+                border: 1px solid #E2E8F0;
+                border-radius: 8px;
+                padding: 4px 8px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel#WorkflowBadge[state="success"], QLabel#StatusBadge[state="success"] {
+                color: #166534;
+                background: #DCFCE7;
+                border: 1px solid #BBF7D0;
+            }
+            QLabel#WorkflowBadge[state="processing"], QLabel#StatusBadge[state="processing"] {
+                color: #2563EB;
+                background: #DBEAFE;
+                border: 1px solid #BFDBFE;
+            }
+            QLabel#WorkflowBadge[state="waiting"], QLabel#StatusBadge[state="waiting"] {
+                color: #64748B;
+                background: #F1F5F9;
+                border: 1px solid #E2E8F0;
+            }
+            QLabel#WorkflowBadge[state="warning"], QLabel#StatusBadge[state="warning"] {
+                color: #92400E;
+                background: #FEF3C7;
+                border: 1px solid #FDE68A;
+            }
+            QLabel#WorkflowBadge[state="error"], QLabel#StatusBadge[state="error"] {
+                color: #B91C1C;
+                background: #FEE2E2;
+                border: 1px solid #FECACA;
+            }
+            QLabel#ProgressStatus {
+                color: #334155;
+                font-size: 13px;
+                font-weight: 700;
             }
             QLabel#FieldLabel {
                 color: #64748B;
@@ -395,7 +766,7 @@ class MainWindow(QMainWindow):
             }
             QLabel#FileCard {
                 padding: 18px 22px;
-                background: #FFFFFF;
+                background: #F8FAFC;
                 border: 1px solid #E2E8F0;
                 border-radius: 12px;
                 color: #334155;
@@ -406,25 +777,34 @@ class MainWindow(QMainWindow):
                 background: #FFFFFF;
                 border: none;
                 border-radius: 0px;
-                selection-background-color: #B9E6DE;
+                selection-background-color: #BFDBFE;
+            }
+            QTextBrowser#ActivityLog {
+                background: #FFFFFF;
+                border: none;
+                padding: 0px;
             }
             QTextBrowser#PreviewPanel h2 {
-                color: #0F172A;
+                color: #2563EB;
             }
             QTreeWidget {
-                background: #FAFAFB;
+                background: #FFFFFF;
                 border: none;
                 border-radius: 0px;
                 padding: 2px;
+                color: #334155;
             }
             QTreeWidget::item {
                 min-height: 38px;
                 padding: 8px 12px;
                 border-radius: 8px;
             }
+            QTreeWidget::item:hover {
+                background: #F0F5FF;
+            }
             QTreeWidget::item:selected {
-                background: #EFF1F4;
-                color: #111827;
+                background: #E8F1FF;
+                color: #2563EB;
             }
             QTreeWidget::branch {
                 image: none;
@@ -433,21 +813,22 @@ class MainWindow(QMainWindow):
             QPushButton {
                 min-height: 40px;
                 padding: 9px 18px;
-                border-radius: 10px;
-                border: 1px solid #CBD5E1;
+                border-radius: 8px;
+                border: 1px solid #E2E8F0;
                 background: #FFFFFF;
-                color: #0F172A;
+                color: #334155;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background: #F8FAFC;
+                background: #F1F5F9;
             }
             QPushButton:pressed {
-                background: #E2E8F0;
+                background: #F0F5FF;
             }
             QPushButton:disabled {
-                color: #9CA3AF;
-                background: #F3F4F6;
+                color: #94A3B8;
+                background: #F1F5F9;
+                border-color: #E2E8F0;
             }
             QPushButton#SidebarToggle {
                 min-width: 44px;
@@ -457,43 +838,72 @@ class MainWindow(QMainWindow):
                 padding: 0;
                 border-radius: 10px;
                 border: 1px solid transparent;
-                color: #0F172A;
+                color: #475569;
                 background: transparent;
-                font-size: 22px;
             }
             QPushButton#SidebarToggle:hover {
-                background: #EEF2F7;
+                background: #F1F5F9;
             }
             QPushButton#SidebarAction {
                 min-height: 42px;
                 padding: 8px 10px;
                 background: #F8FAFC;
+                color: #334155;
+                border: 1px solid #E2E8F0;
             }
             QPushButton#OutlineButton {
-                background: #FFFFFF;
-                border: 1px solid #CBD5E1;
+                background: #2563EB;
+                border: 1px solid #2563EB;
+                color: #FFFFFF;
+            }
+            QPushButton#OutlineButton:hover {
+                background: #1D4ED8;
+                border-color: #1D4ED8;
             }
             QPushButton#PrimaryButton {
-                background: #008C83;
+                background: #2563EB;
                 color: #FFFFFF;
-                border: 1px solid #008C83;
+                border: 1px solid #2563EB;
             }
             QPushButton#PrimaryButton:hover {
-                background: #00766F;
+                background: #1D4ED8;
+                border-color: #1D4ED8;
+            }
+            QPushButton#PrimaryButton:pressed {
+                background: #1E40AF;
+                border-color: #1E40AF;
             }
             QPushButton#SecondaryActionButton {
-                background: #111827;
+                background: #2563EB;
                 color: #FFFFFF;
-                border: 1px solid #111827;
+                border: 1px solid #2563EB;
             }
             QPushButton#SecondaryActionButton:hover {
-                background: #1E293B;
+                background: #1D4ED8;
+                border-color: #1D4ED8;
             }
             QLineEdit {
-                border: 1px solid #D1D5DB;
+                border: 1px solid #CBD5E1;
                 border-radius: 8px;
                 padding: 8px 12px;
                 background: #FFFFFF;
+                color: #334155;
+                selection-background-color: #BFDBFE;
+            }
+            QLineEdit:focus {
+                border: 1px solid #60A5FA;
+            }
+            QLineEdit#SearchInput {
+                min-height: 36px;
+                background: #F8FAFC;
+                border: 1px solid #E2E8F0;
+                border-radius: 8px;
+                padding: 6px 10px;
+            }
+            QLineEdit#ReadOnlyInput {
+                background: #F8FAFC;
+                border: 1px solid #CBD5E1;
+                color: #64748B;
             }
             QProgressBar {
                 min-height: 10px;
@@ -506,11 +916,48 @@ class MainWindow(QMainWindow):
             }
             QProgressBar::chunk {
                 border-radius: 5px;
-                background: #008C83;
+                background: #2563EB;
             }
             QSplitter::handle {
-                background: #E7EAF0;
-                width: 1px;
+                background: #F7F9FC;
+                width: 8px;
+            }
+            QPushButton#PreviewTabButton {
+                min-width: 118px;
+                min-height: 38px;
+                border-radius: 8px 8px 0px 0px;
+                border: 1px solid transparent;
+                background: #F5F7FA;
+                color: #475569;
+            }
+            QPushButton#PreviewTabButton:checked {
+                background: #FFFFFF;
+                color: #2563EB;
+                border-bottom: 3px solid #2563EB;
+            }
+            QPushButton#DetailButton {
+                min-width: 38px;
+                max-width: 38px;
+                min-height: 38px;
+                max-height: 38px;
+                border: 1px solid transparent;
+                background: #FFFFFF;
+                color: #334155;
+            }
+            QPushButton#DetailButton:hover {
+                background: #F1F5F9;
+            }
+            QPushButton#GhostButton {
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                color: #2563EB;
+                min-height: 34px;
+                padding: 6px 12px;
+            }
+            QLabel#DialogTitle {
+                color: #111827;
+                font-size: 18px;
+                font-weight: 700;
             }
             """
         )
@@ -525,32 +972,32 @@ class MainWindow(QMainWindow):
             <style>
                 body {
                     font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-                    color: #17201E;
+                    color: #1F2937;
                     line-height: 1.65;
                     background: #FFFFFF;
                 }
-                h1, h2, h3 { color: #111827; }
-                a { color: #0F766E; text-decoration: none; font-weight: 600; }
-                .muted { color: #6B7280; }
+                h1, h2, h3 { color: #2563EB; }
+                a { color: #2563EB; text-decoration: none; font-weight: 600; }
+                .muted { color: #64748B; }
                 .file-card {
                     margin: 14px 0;
                     padding: 14px 16px;
-                    border: 1px solid #E5E7EB;
+                    border: 1px solid #E2E8F0;
                     border-radius: 8px;
-                    background: #FAFAFA;
+                    background: #F8FAFC;
                 }
-                .path { color: #4B5563; font-size: 13px; }
+                .path { color: #64748B; font-size: 13px; }
                 .pdf-page {
                     margin: 18px 0 28px 0;
                     padding: 14px;
-                    border: 1px solid #E5E7EB;
+                    border: 1px solid #E2E8F0;
                     border-radius: 8px;
-                    background: #FAFAFA;
+                    background: #F8FAFC;
                 }
                 .pdf-page img {
                     width: 100%;
                     max-width: 980px;
-                    border: 1px solid #E5E7EB;
+                    border: 1px solid #E2E8F0;
                     background: #FFFFFF;
                 }
             </style>
@@ -563,19 +1010,124 @@ class MainWindow(QMainWindow):
         if self.sidebar_visible:
             if sizes and sizes[0] > 0:
                 self.last_sidebar_width = sizes[0]
-            self.sidebar_header.removeWidget(self.sidebar_toggle_button)
-            self.workspace_header.insertWidget(0, self.sidebar_toggle_button)
+            self._remove_sidebar_toggle()
+            self.sidebar_rail_layout.insertWidget(0, self.sidebar_toggle_button)
+            self.sidebar_rail.show()
             self.sidebar.hide()
             self.sidebar_visible = False
-            self.sidebar_toggle_button.setText("☰")
             self.splitter.setSizes([0, max(sum(sizes), 900)])
         else:
-            self.workspace_header.removeWidget(self.sidebar_toggle_button)
+            self._remove_sidebar_toggle()
             self.sidebar_header.addWidget(self.sidebar_toggle_button)
             self.sidebar.show()
+            self.sidebar_rail.hide()
             self.sidebar_visible = True
-            self.sidebar_toggle_button.setText("☰")
             self.splitter.setSizes([max(self.last_sidebar_width, 260), 900])
+
+    def _remove_sidebar_toggle(self) -> None:
+        self.sidebar_header.removeWidget(self.sidebar_toggle_button)
+        self.workspace_header.removeWidget(self.sidebar_toggle_button)
+        self.preview_header_layout.removeWidget(self.sidebar_toggle_button)
+        self.sidebar_rail_layout.removeWidget(self.sidebar_toggle_button)
+
+    def _sync_preview_tabs(self) -> None:
+        buttons = {
+            "pdf": self.preview_tab_pdf,
+            "translation": self.preview_tab_translation,
+            "summary": self.preview_tab_summary,
+        }
+        for name, button in buttons.items():
+            button.setChecked(name == self.current_preview_tab)
+
+    def set_preview_tab(self, tab: str) -> None:
+        self.current_preview_tab = tab
+        self._sync_preview_tabs()
+        self._show_current_preview()
+
+    def _show_current_preview(self) -> None:
+        paper = self.current_paper
+        if paper is None:
+            self._set_preview_html(
+                "<h2>等待论文</h2>"
+                "<p class='muted'>请先在左侧选择论文，或在中间区域上传 PDF。</p>"
+            )
+            return
+        path: Path | None
+        if self.current_preview_tab == "pdf":
+            path = paper.original_pdf
+        elif self.current_preview_tab == "translation":
+            path = paper.translated_md
+        else:
+            path = paper.summary_md
+        if path and path.exists():
+            self.preview_path(path)
+            return
+        label = {
+            "pdf": "原论文 PDF",
+            "translation": "中文译文 Markdown",
+            "summary": "Summary Markdown",
+        }[self.current_preview_tab]
+        self._set_preview_html(
+            f"<h2>{html.escape(label)} 尚未生成</h2>"
+            f"<p class='muted'>当前论文：{html.escape(paper.name)}</p>"
+        )
+
+    def enter_detail_mode(self) -> None:
+        self.detail_mode = True
+        self.work_panel.hide()
+        self.detail_button.hide()
+        self.close_detail_button.show()
+
+    def exit_detail_mode(self) -> None:
+        self.detail_mode = False
+        self.work_panel.show()
+        self.detail_button.show()
+        self.close_detail_button.hide()
+
+    def _append_log(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_entries.insert(0, (timestamp, message))
+        self.log_entries = self.log_entries[:80]
+        rows = [
+            f"<p><span class='time'>{html.escape(time)}</span> {html.escape(text)}</p>"
+            for time, text in self.log_entries
+        ]
+        self.activity_log.setHtml(
+            "<style>"
+            "body{font-family:'Segoe UI','Microsoft YaHei UI',sans-serif;color:#334155;}"
+            "p{margin:0 0 9px 0;}"
+            ".time{float:right;color:#64748B;font-size:12px;}"
+            "</style>"
+            + "".join(rows)
+        )
+
+    def clear_activity_log(self) -> None:
+        self.log_entries.clear()
+        self.activity_log.clear()
+
+    def _set_workflow_badges(self, parse: str, terms: str, output: str) -> None:
+        for label, text in [
+            (self.workflow_badge_parse, parse),
+            (self.workflow_badge_terms, terms),
+            (self.workflow_badge_output, output),
+        ]:
+            self._set_badge(label, text)
+
+    def _set_badge(self, label: QLabel, text: str) -> None:
+        label.setText(text)
+        state = "waiting"
+        if "已完成" in text or "健康" in text:
+            state = "success"
+        elif "进行中" in text or "处理中" in text:
+            state = "processing"
+        elif "失败" in text or "错误" in text:
+            state = "error"
+        elif "警告" in text:
+            state = "warning"
+        label.setProperty("state", state)
+        label.style().unpolish(label)
+        label.style().polish(label)
+        label.update()
 
     def on_preview_link_clicked(self, url: QUrl) -> None:
         if url.isLocalFile():
@@ -611,6 +1163,46 @@ class MainWindow(QMainWindow):
         # inside the embedded Markdown preview.
         self.detail.setSearchPaths([str(path.parent), str(path.parent / "assets")])
         self.detail.document().setBaseUrl(QUrl.fromLocalFile(str(path.parent) + os.sep))
+        self.detail.document().setDefaultStyleSheet(
+            """
+            body {
+                font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+                color: #1F2937;
+                line-height: 1.65;
+                background: #FFFFFF;
+            }
+            h1, h2, h3, h4 {
+                color: #2563EB;
+                font-weight: 700;
+            }
+            p, li {
+                color: #1F2937;
+            }
+            code {
+                background: #F8FAFC;
+                border: 1px solid #E2E8F0;
+                border-radius: 6px;
+                padding: 2px 5px;
+            }
+            pre {
+                background: #F8FAFC;
+                border: 1px solid #E2E8F0;
+                border-radius: 8px;
+                padding: 12px;
+            }
+            table {
+                border-collapse: collapse;
+                border: 1px solid #CBD5E1;
+            }
+            th {
+                background: #F8FAFC;
+            }
+            th, td {
+                border: 1px solid #CBD5E1;
+                padding: 6px 8px;
+            }
+            """
+        )
         self.detail.setMarkdown(markdown)
         self.statusBar().showMessage(f"正在预览 Markdown：{path.name}")
 
@@ -660,20 +1252,34 @@ class MainWindow(QMainWindow):
     def refresh_folders(self, preferred_path: Path | None = None) -> None:
         self.library_tree.clear()
         preferred_item: QTreeWidgetItem | None = None
+        query = self.search_input.text().strip().lower() if hasattr(self, "search_input") else ""
         folders = self.library.list_folders()
         if not folders:
             # The output folder should always have a starter collection.
             self.library.create_folder("默认文件夹")
             folders = self.library.list_folders()
         for folder in folders:
+            papers = self.library.list_papers(folder)
+            if query:
+                papers = [
+                    paper
+                    for paper in papers
+                    if query in paper.name.lower()
+                    or query in folder.name.lower()
+                    or any(query in file.name.lower() for file in paper.path.glob("*") if file.is_file())
+                ]
+                if not papers and query not in folder.name.lower():
+                    continue
             folder_item = QTreeWidgetItem([folder.name])
+            folder_item.setIcon(0, self._make_icon("folder", "#F59E0B"))
             folder_item.setData(0, Qt.UserRole, {"kind": "collection", "folder": folder, "path": folder.path})
             self.library_tree.addTopLevelItem(folder_item)
             folder_item.setExpanded(True)
             if preferred_path is not None and folder.path.resolve() == preferred_path.resolve():
                 preferred_item = folder_item
-            for paper in self.library.list_papers(folder):
+            for paper in papers:
                 paper_item = QTreeWidgetItem([paper.name])
+                paper_item.setIcon(0, self._make_icon("file", "#2563EB"))
                 paper_item.setData(
                     0,
                     Qt.UserRole,
@@ -682,22 +1288,28 @@ class MainWindow(QMainWindow):
                 folder_item.addChild(paper_item)
                 if preferred_path is not None and paper.path.resolve() == preferred_path.resolve():
                     preferred_item = paper_item
-                file_preferred = self._add_file_children(paper_item, paper.path, folder, preferred_path)
+                file_preferred = self._add_file_children(paper_item, paper, folder, preferred_path, query)
                 if file_preferred is not None:
                     preferred_item = file_preferred
         if preferred_item is not None:
             self.library_tree.setCurrentItem(preferred_item)
             preferred_item.setExpanded(True)
+            parent = preferred_item.parent()
+            while parent is not None:
+                parent.setExpanded(True)
+                parent = parent.parent()
         elif self.library_tree.topLevelItemCount():
             self.library_tree.setCurrentItem(self.library_tree.topLevelItem(0))
 
     def _add_file_children(
         self,
         parent_item: QTreeWidgetItem,
-        path: Path,
+        paper: PaperRecord,
         folder: LibraryFolder,
         preferred_path: Path | None = None,
+        query: str = "",
     ) -> QTreeWidgetItem | None:
+        path = paper.path
         if not path.exists() or not path.is_dir():
             return None
         preferred_item: QTreeWidgetItem | None = None
@@ -705,17 +1317,27 @@ class MainWindow(QMainWindow):
         for child in children:
             if child.name.startswith("."):
                 continue
+            if child.is_dir() or child.suffix.lower() not in {".pdf", ".md"}:
+                continue
+            if query and query not in child.name.lower() and query not in paper.name.lower() and query not in folder.name.lower():
+                continue
             kind = "dir" if child.is_dir() else "file"
-            item = QTreeWidgetItem([child.name])
-            item.setData(0, Qt.UserRole, {"kind": kind, "folder": folder, "path": child})
+            item = QTreeWidgetItem([self._display_file_name(child)])
+            item.setIcon(0, self._make_icon("file", "#64748B"))
+            item.setData(0, Qt.UserRole, {"kind": kind, "folder": folder, "paper": paper, "path": child})
             parent_item.addChild(item)
             if preferred_path is not None and child.resolve() == preferred_path.resolve():
                 preferred_item = item
-            if child.is_dir():
-                nested_preferred = self._add_file_children(item, child, folder, preferred_path)
-                if nested_preferred is not None:
-                    preferred_item = nested_preferred
         return preferred_item
+
+    def _display_file_name(self, path: Path) -> str:
+        if path.suffix.lower() == ".pdf":
+            return "原论文.pdf"
+        if path.name == "translated.md":
+            return "中文译文.md"
+        if path.name == "summary.md":
+            return "Summary.md"
+        return path.name
 
     def _selected_data(self) -> dict:
         item = self.library_tree.currentItem()
@@ -738,11 +1360,66 @@ class MainWindow(QMainWindow):
         except ValueError:
             return False
 
+    def _move_to_recycle_bin(self, path: Path) -> None:
+        if sys.platform != "win32":
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+            return
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [
+                ("hwnd", wintypes.HWND),
+                ("wFunc", wintypes.UINT),
+                ("pFrom", wintypes.LPCWSTR),
+                ("pTo", wintypes.LPCWSTR),
+                ("fFlags", wintypes.USHORT),
+                ("fAnyOperationsAborted", wintypes.BOOL),
+                ("hNameMappings", wintypes.LPVOID),
+                ("lpszProgressTitle", wintypes.LPCWSTR),
+            ]
+
+        source = str(path.resolve()) + "\0\0"
+        operation = SHFILEOPSTRUCTW()
+        operation.hwnd = 0
+        operation.wFunc = 3  # FO_DELETE
+        operation.pFrom = source
+        operation.pTo = None
+        operation.fFlags = 0x0040 | 0x0010 | 0x0004  # recycle bin, no confirm, silent
+        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+        if result != 0:
+            raise OSError(f"移动到回收站失败，错误码：{result}")
+        if operation.fAnyOperationsAborted:
+            raise OSError("删除操作已取消。")
+
     def _set_selected_pdf_label(self, path: Path | None) -> None:
         if path is None:
             self.selected_pdf_label.setText("尚未选择 PDF")
             return
         self.selected_pdf_label.setText(f"PDF 论文\n{path.name}\n{path}")
+
+    def _update_work_panel_for_paper(self, paper: PaperRecord | None) -> None:
+        self.current_paper = paper
+        if paper is None:
+            self.paper_title_label.setText("选择或上传一篇论文")
+            self.folder_label.setText(
+                f"当前文件夹：{self.current_folder.name}" if self.current_folder else "请选择或新建一个文件夹"
+            )
+            self._set_badge(self.project_status_badge, "未选择")
+            self._set_selected_pdf_label(self.current_pdf)
+            self._set_workflow_badges("待处理", "待处理", "待处理")
+            return
+        self.paper_title_label.setText(paper.name)
+        self.folder_label.setText(f"位置：{paper.path}")
+        self._set_badge(self.project_status_badge, "项目健康")
+        self.current_pdf = paper.original_pdf
+        self._set_selected_pdf_label(paper.original_pdf)
+        self._set_workflow_badges(
+            "已完成" if paper.original_pdf else "待上传",
+            "已完成" if paper.translated_md or paper.summary_md else "待处理",
+            "已完成" if paper.translated_md or paper.summary_md else "待生成",
+        )
 
     def on_tree_selection_changed(
         self,
@@ -760,24 +1437,35 @@ class MainWindow(QMainWindow):
 
         kind = data.get("kind")
         if kind == "collection":
+            self.current_pdf = None
+            self._update_work_panel_for_paper(None)
             self._set_preview_html(
                 f"<h2>{folder.name}</h2>"
-                "<p class='muted'>双击左侧文件夹可展开/收起论文列表；单击论文或文件可在这里查看入口或预览。</p>"
+                "<p class='muted'>请选择该文件夹下的论文，或上传新的 PDF。</p>"
                 f"<p class='path'>路径：{html.escape(str(folder.path))}</p>",
                 folder.path,
             )
         elif kind == "paper":
             paper = data["paper"]
-            if paper.original_pdf:
-                self.current_pdf = paper.original_pdf
-                self._set_selected_pdf_label(self.current_pdf)
-            self.show_paper_detail(paper)
+            self._update_work_panel_for_paper(paper)
+            self.current_preview_tab = "pdf"
+            self._sync_preview_tabs()
+            self._show_current_preview()
         elif kind in {"file", "dir"}:
             path = Path(data["path"])
+            paper = data.get("paper")
+            if paper:
+                self._update_work_panel_for_paper(paper)
             if path.suffix.lower() == ".pdf":
                 self.current_pdf = path
                 self._set_selected_pdf_label(self.current_pdf)
-            self.show_path_detail(path)
+                self.current_preview_tab = "pdf"
+            elif path.name == "translated.md":
+                self.current_preview_tab = "translation"
+            elif path.name == "summary.md":
+                self.current_preview_tab = "summary"
+            self._sync_preview_tabs()
+            self._show_current_preview()
 
     def on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         data = item.data(0, Qt.UserRole) or {}
@@ -786,7 +1474,8 @@ class MainWindow(QMainWindow):
             item.setExpanded(not item.isExpanded())
             return
         if path:
-            self.preview_path(Path(path))
+            self.show_path_detail(Path(path))
+            self.enter_detail_mode()
 
     def create_folder(self) -> None:
         name, ok = QInputDialog.getText(self, "新建文件夹", "文件夹名称：")
@@ -799,26 +1488,46 @@ class MainWindow(QMainWindow):
         if not data:
             return
         old_path = Path(data["path"])
-        name, ok = QInputDialog.getText(self, "重命名", "新名称：", text=old_path.name)
+        kind = data.get("kind")
+        current_name = data["paper"].name if kind == "paper" and data.get("paper") else old_path.name
+        name, ok = QInputDialog.getText(self, "重命名", "新名称：", text=current_name)
         if not ok or not name.strip():
             return
-        new_name = self._clean_name(name.strip())
-        if not new_name:
+        display_name = name.strip()
+        path_name = self._clean_name(display_name)
+        if not path_name:
             QMessageBox.warning(self, "名称无效", "请输入一个有效名称。")
             return
         try:
-            if data.get("kind") == "collection":
-                self.library.rename_folder(data["folder"], new_name)
+            if kind == "collection":
+                renamed = self.library.rename_folder(data["folder"], path_name)
+                self.refresh_folders(preferred_path=renamed.path)
+                return
+            if kind == "paper":
+                metadata_path = old_path / "metadata.json"
+                metadata = {}
+                if metadata_path.exists():
+                    try:
+                        metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                    except (OSError, json.JSONDecodeError):
+                        metadata = {}
+                metadata["display_name"] = display_name
+                metadata_path.write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                self.refresh_folders(preferred_path=old_path)
+                return
             else:
                 if not self._is_inside_library(old_path):
                     QMessageBox.warning(self, "不能重命名", "只能重命名 output 目录内的文件或文件夹。")
                     return
-                target = old_path.with_name(new_name)
+                target = old_path.with_name(path_name)
                 if target.exists():
                     QMessageBox.warning(self, "名称已存在", f"{target} 已存在。")
                     return
                 old_path.rename(target)
-            self.refresh_folders()
+            self.refresh_folders(preferred_path=target)
         except OSError as exc:
             QMessageBox.critical(self, "重命名失败", str(exc))
 
@@ -847,15 +1556,14 @@ class MainWindow(QMainWindow):
             return
         try:
             deleted_current_pdf = self.current_pdf is not None and self._path_is_inside(self.current_pdf, path)
-            if path.is_dir():
-                shutil.rmtree(path)
-            elif path.exists():
-                path.unlink()
+            self._move_to_recycle_bin(path)
             preferred_path = path.parent if self._is_inside_library(path.parent) else None
             self.current_folder = data.get("folder")
             if deleted_current_pdf:
                 self.current_pdf = None
                 self._set_selected_pdf_label(None)
+            if self.current_paper is not None and self._path_is_inside(self.current_paper.path, path):
+                self.current_paper = None
             self.refresh_folders(preferred_path=preferred_path)
         except OSError as exc:
             QMessageBox.critical(self, "删除失败", str(exc))
@@ -889,6 +1597,9 @@ class MainWindow(QMainWindow):
         self.upload_button.setEnabled(False)
         self.progress.setValue(0)
         self.progress_status_label.setText("处理中...")
+        self.last_progress_message = ""
+        self._set_workflow_badges("进行中", "待处理", "待生成")
+        self._append_log("开始生成中文译文。" if action == "translation" else "开始生成 Summary。")
         if action == "translation":
             self.translate_button.setText("取消译文")
             self.translate_button.setEnabled(True)
@@ -908,11 +1619,13 @@ class MainWindow(QMainWindow):
         self.summary_button.setEnabled(True)
         self.progress.setValue(0)
         self.progress_status_label.setText("就绪")
+        self._update_work_panel_for_paper(self.current_paper)
 
     def cancel_active_task(self) -> None:
         if not self.active_task:
             return
         self.active_task.cancel()
+        self._append_log("已请求取消当前生成任务。")
         self.statusBar().showMessage("正在取消生成，等待当前 DeepSeek 请求返回后停止...")
         if self.active_action == "translation":
             self.translate_button.setEnabled(False)
@@ -951,53 +1664,60 @@ class MainWindow(QMainWindow):
     def on_progress(self, message: str, value: int) -> None:
         self.progress.setValue(value)
         self.progress_status_label.setText(f"{value}%")
+        if value >= 42:
+            self._set_workflow_badges("已完成", "已完成", "进行中")
+        elif value >= 30:
+            self._set_workflow_badges("已完成", "进行中", "待生成")
+        elif value >= 18:
+            self._set_workflow_badges("进行中", "待处理", "待生成")
+        if message != self.last_progress_message:
+            self._append_log(message)
+            self.last_progress_message = message
         self.statusBar().showMessage(message)
 
     def on_finished(self, outputs: PaperOutputs) -> None:
         self._reset_processing_state()
+        self._set_workflow_badges("已完成", "已完成", "已完成")
+        self._append_log("已生成 Markdown 文件。")
         self.statusBar().showMessage("生成完成，进度已复位")
         self.refresh_folders(preferred_path=outputs.paper_dir)
         if outputs.translated_md:
-            self.preview_path(outputs.translated_md)
+            self.current_preview_tab = "translation"
         elif outputs.summary_md:
-            self.preview_path(outputs.summary_md)
+            self.current_preview_tab = "summary"
+        self._sync_preview_tabs()
+        self._show_current_preview()
         generated = [path for path in [outputs.translated_md, outputs.summary_md] if path is not None]
         QMessageBox.information(self, "生成完成", "已生成：\n" + "\n".join(str(path) for path in generated))
 
     def on_failed(self, message: str) -> None:
         self._reset_processing_state()
+        self._append_log(f"任务失败：{message}")
         self.statusBar().showMessage("生成失败，进度已复位")
         QMessageBox.critical(self, "生成失败", message)
 
     def on_canceled(self, message: str) -> None:
         self._reset_processing_state()
         self.refresh_folders()
+        self._append_log("任务已取消。")
         self.statusBar().showMessage("已取消生成，进度已复位")
         QMessageBox.information(self, "已取消", f"{message}\n半截输出已清理，旧的完整文件会保留。")
 
     def show_paper_detail(self, paper: PaperRecord) -> None:
-        links = [
-            f"<h2>{html.escape(paper.name)}</h2>",
-            "<p class='muted'>点击下面的入口，或双击左侧文件，即可在本窗口中预览。</p>",
-        ]
-        for label, path in [
-            ("英文论文 PDF", paper.original_pdf),
-            ("中文译文 Markdown", paper.translated_md),
-            ("中文 Summary Markdown", paper.summary_md),
-        ]:
-            if path:
-                url = QUrl.fromLocalFile(str(path)).toString()
-                links.append(
-                    "<div class='file-card'>"
-                    f"<a href='{url}'>{html.escape(label)}</a>"
-                    f"<p class='path'>{html.escape(str(path))}</p>"
-                    "</div>"
-                )
-        links.append(f"<p class='path'>文件夹：{html.escape(str(paper.path))}</p>")
-        self._set_preview_html("\n".join(links), paper.path)
+        self._update_work_panel_for_paper(paper)
+        self.current_preview_tab = "pdf"
+        self._sync_preview_tabs()
+        self._show_current_preview()
 
     def show_path_detail(self, path: Path) -> None:
         if path.is_file() and path.suffix.lower() in {".md", ".pdf"}:
+            if path.suffix.lower() == ".pdf":
+                self.current_preview_tab = "pdf"
+            elif path.name == "translated.md":
+                self.current_preview_tab = "translation"
+            elif path.name == "summary.md":
+                self.current_preview_tab = "summary"
+            self._sync_preview_tabs()
             self.preview_path(path)
             return
         kind = "文件夹" if path.is_dir() else "文件"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,12 +57,20 @@ class LibraryManager:
         for path in sorted(folder.path.iterdir()):
             if not path.is_dir():
                 continue
+            display_name = path.name
+            metadata_path = path / "metadata.json"
+            if metadata_path.exists():
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                    display_name = str(metadata.get("display_name") or path.name)
+                except (OSError, json.JSONDecodeError):
+                    display_name = path.name
             # Each paper folder keeps the original PDF name rather than forcing
             # "original.pdf", so the file remains recognizable outside the app.
             pdfs = sorted(path.glob("*.pdf"))
             papers.append(
                 PaperRecord(
-                    name=path.name,
+                    name=display_name,
                     path=path,
                     original_pdf=pdfs[0] if pdfs else None,
                     translated_md=path / "translated.md" if (path / "translated.md").exists() else None,
