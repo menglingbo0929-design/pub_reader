@@ -12,8 +12,9 @@ from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QByteArray, QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
+from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTextBrowser,
@@ -57,16 +59,16 @@ class ApiKeyDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("接入 DeepSeek API Key")
         self.setModal(True)
-        self.setMinimumWidth(500)
+        self.setFixedWidth(560)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setContentsMargins(28, 26, 28, 26)
         layout.setSpacing(14)
         dialog_head = QHBoxLayout()
         dialog_head.setSpacing(12)
         key_icon = QLabel()
         key_icon.setObjectName("DialogKeyIcon")
-        key_icon.setPixmap(self.parent()._make_icon("app", "#2563EB").pixmap(QSize(28, 28)) if isinstance(self.parent(), MainWindow) else QPixmap())
+        key_icon.setPixmap(self.parent()._make_icon("key", "#2563EB").pixmap(QSize(28, 28)) if isinstance(self.parent(), MainWindow) else QPixmap())
         title = QLabel("接入 DeepSeek API Key")
         title.setObjectName("DialogTitle")
         dialog_head.addWidget(key_icon)
@@ -96,6 +98,8 @@ class ApiKeyDialog(QDialog):
         cancel = QPushButton("取消")
         confirm = QPushButton("开始生成")
         confirm.setObjectName("PrimaryButton")
+        cancel.setMinimumWidth(118)
+        confirm.setMinimumWidth(154)
         cancel.clicked.connect(self.reject)
         confirm.clicked.connect(self.accept)
         buttons.addStretch()
@@ -195,156 +199,88 @@ class MainWindow(QMainWindow):
     def _make_icon(self, kind: str, color: str = "#64748B") -> QIcon:
         pixmap = QPixmap(22, 22)
         pixmap.fill(Qt.transparent)
+        renderer = QSvgRenderer(QByteArray(self._icon_svg(kind, color).encode("utf-8")))
         painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(color), 1.8)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-
-        if kind == "folder":
-            painter.setBrush(QColor(color))
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(3, 7, 16, 11, 2.5, 2.5)
-            painter.drawRoundedRect(4, 5, 7, 4, 2, 2)
-        elif kind == "file":
-            painter.drawRoundedRect(5, 3, 12, 16, 2, 2)
-            painter.drawLine(12, 3, 17, 8)
-            painter.drawLine(12, 3, 12, 8)
-            painter.drawLine(12, 8, 17, 8)
-            painter.drawLine(8, 12, 14, 12)
-            painter.drawLine(8, 15, 14, 15)
-        elif kind == "upload":
-            painter.drawRoundedRect(5, 12, 12, 5, 1.5, 1.5)
-            painter.drawLine(11, 13, 11, 5)
-            painter.drawLine(8, 8, 11, 5)
-            painter.drawLine(14, 8, 11, 5)
-        elif kind == "refresh":
-            painter.drawArc(5, 5, 12, 12, 30 * 16, 260 * 16)
-            painter.drawLine(15, 4, 17, 8)
-            painter.drawLine(15, 4, 11, 5)
-        elif kind == "edit":
-            painter.drawLine(6, 16, 15, 7)
-            painter.drawLine(14, 6, 16, 8)
-            painter.drawLine(5, 17, 9, 16)
-        elif kind == "trash":
-            painter.drawLine(7, 8, 15, 8)
-            painter.drawRect(8, 9, 6, 8)
-            painter.drawLine(9, 6, 13, 6)
-            painter.drawLine(10, 11, 10, 15)
-            painter.drawLine(12, 11, 12, 15)
-        elif kind == "menu":
-            painter.drawLine(5, 7, 17, 7)
-            painter.drawLine(5, 11, 17, 11)
-            painter.drawLine(5, 15, 17, 15)
-        elif kind == "expand":
-            painter.drawLine(7, 15, 15, 7)
-            painter.drawLine(10, 7, 15, 7)
-            painter.drawLine(15, 7, 15, 12)
-        elif kind == "app":
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(color))
-            painter.drawRoundedRect(3, 3, 16, 16, 4, 4)
-            painter.setBrush(QColor("#FFFFFF"))
-            painter.drawRoundedRect(6, 7, 5, 9, 1.2, 1.2)
-            painter.drawRoundedRect(11, 7, 5, 9, 1.2, 1.2)
-            painter.setPen(QPen(QColor("#DBEAFE"), 1.1))
-            painter.drawLine(11, 8, 11, 16)
-            painter.drawLine(7, 10, 10, 10)
-            painter.drawLine(12, 10, 15, 10)
-        elif kind == "more":
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(color))
-            painter.drawEllipse(10, 5, 2, 2)
-            painter.drawEllipse(10, 10, 2, 2)
-            painter.drawEllipse(10, 15, 2, 2)
-        elif kind == "check":
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#22C55E"))
-            painter.drawEllipse(3, 3, 16, 16)
-            painter.setPen(QPen(QColor("#FFFFFF"), 2.0))
-            painter.drawLine(7, 11, 10, 14)
-            painter.drawLine(10, 14, 15, 8)
-        elif kind == "info":
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#3B82F6"))
-            painter.drawEllipse(3, 3, 16, 16)
-            painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
-            painter.drawLine(11, 10, 11, 15)
-            painter.drawPoint(11, 7)
-        elif kind == "chevron":
-            painter.drawLine(8, 6, 14, 11)
-            painter.drawLine(14, 11, 8, 16)
-        elif kind == "collapse":
-            painter.drawLine(14, 6, 9, 11)
-            painter.drawLine(9, 11, 14, 16)
-            painter.drawLine(18, 6, 13, 11)
-            painter.drawLine(13, 11, 18, 16)
-        elif kind == "pdf":
-            painter.setPen(QPen(QColor("#EF4444"), 1.5))
-            painter.drawRoundedRect(5, 3, 12, 16, 2, 2)
-            painter.drawLine(12, 3, 17, 8)
-            painter.drawLine(12, 3, 12, 8)
-            painter.drawLine(12, 8, 17, 8)
-            painter.setBrush(QColor("#FEE2E2"))
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(5, 12, 12, 6, 1.5, 1.5)
-            painter.setPen(QPen(QColor("#B91C1C"), 1.0))
-            font = painter.font()
-            font.setPointSize(4)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(6, 17, "PDF")
-        elif kind == "md":
-            painter.setPen(QPen(QColor(color), 1.5))
-            painter.drawRoundedRect(5, 3, 12, 16, 2, 2)
-            painter.drawLine(12, 3, 17, 8)
-            painter.drawLine(12, 3, 12, 8)
-            painter.drawLine(12, 8, 17, 8)
-            font = painter.font()
-            font.setPointSize(5)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(7, 16, "M")
-        elif kind == "calendar":
-            painter.drawRoundedRect(4, 5, 14, 13, 2, 2)
-            painter.drawLine(4, 9, 18, 9)
-            painter.drawLine(8, 3, 8, 7)
-            painter.drawLine(14, 3, 14, 7)
-        elif kind == "search":
-            painter.drawEllipse(5, 5, 9, 9)
-            painter.drawLine(13, 13, 17, 17)
-        elif kind == "plus":
-            painter.drawLine(11, 5, 11, 17)
-            painter.drawLine(5, 11, 17, 11)
-        elif kind == "book":
-            painter.setPen(QPen(QColor(color), 1.5))
-            painter.drawRoundedRect(4, 5, 7, 13, 1.5, 1.5)
-            painter.drawRoundedRect(11, 5, 7, 13, 1.5, 1.5)
-            painter.drawLine(11, 6, 11, 18)
-            painter.drawLine(7, 9, 10, 9)
-            painter.drawLine(13, 9, 16, 9)
-        elif kind == "output":
-            painter.drawRoundedRect(5, 4, 12, 14, 2, 2)
-            painter.drawLine(8, 8, 14, 8)
-            painter.drawLine(8, 12, 14, 12)
-            painter.drawLine(8, 16, 12, 16)
-        elif kind == "document_search":
-            painter.setPen(QPen(QColor(color), 1.5))
-            painter.drawRoundedRect(4, 3, 10, 15, 2, 2)
-            painter.drawLine(10, 3, 14, 7)
-            painter.drawLine(10, 3, 10, 7)
-            painter.drawLine(10, 7, 14, 7)
-            painter.drawEllipse(10, 11, 6, 6)
-            painter.drawLine(15, 16, 18, 19)
-        elif kind == "document_edit":
-            painter.setPen(QPen(QColor(color), 1.5))
-            painter.drawRoundedRect(5, 3, 11, 16, 2, 2)
-            painter.drawLine(8, 8, 13, 8)
-            painter.drawLine(8, 11, 12, 11)
-            painter.drawLine(11, 17, 18, 10)
-            painter.drawLine(17, 9, 19, 11)
+        renderer.render(painter)
         painter.end()
         return QIcon(pixmap)
+
+    def _icon_svg(self, kind: str, color: str) -> str:
+        """Return a single-color SVG icon using the same outline style as the reference UI."""
+        stroke = f'stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
+        common = f'fill="none" {stroke}'
+        icons = {
+            "file": f'<path {common} d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path {common} d="M14 2v6h6"/><path {common} d="M16 13H8"/><path {common} d="M16 17H8"/><path {common} d="M10 9H8"/>',
+            "upload": f'<path {common} d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path {common} d="M17 8 12 3 7 8"/><path {common} d="M12 3v12"/>',
+            "edit": f'<path {common} d="M12 20h9"/><path {common} d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+            "trash": f'<path {common} d="M3 6h18"/><path {common} d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path {common} d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path {common} d="M10 11v6"/><path {common} d="M14 11v6"/>',
+            "menu": f'<path {common} d="M4 6h16"/><path {common} d="M4 12h16"/><path {common} d="M4 18h16"/>',
+            "expand": f'<path {common} d="M15 3h6v6"/><path {common} d="m21 3-7 7"/><path {common} d="M9 21H3v-6"/><path {common} d="m3 21 7-7"/>',
+            "more": f'<circle fill="{color}" cx="12" cy="5" r="1.7"/><circle fill="{color}" cx="12" cy="12" r="1.7"/><circle fill="{color}" cx="12" cy="19" r="1.7"/>',
+            "chevron": f'<path {common} d="m9 18 6-6-6-6"/>',
+            "collapse": f'<path {common} d="m11 17-5-5 5-5"/><path {common} d="m18 17-5-5 5-5"/>',
+            "search": f'<circle {common} cx="11" cy="11" r="8"/><path {common} d="m21 21-4.3-4.3"/>',
+            "plus": f'<path {common} d="M5 12h14"/><path {common} d="M12 5v14"/>',
+            "calendar": f'<path {common} d="M8 2v4"/><path {common} d="M16 2v4"/><rect {common} x="3" y="4" width="18" height="18" rx="2"/><path {common} d="M3 10h18"/>',
+            "book": f'<path {common} d="M2 4.5A2.5 2.5 0 0 1 4.5 2H11v19H4.5A2.5 2.5 0 0 1 2 18.5z"/><path {common} d="M22 4.5A2.5 2.5 0 0 0 19.5 2H13v19h6.5a2.5 2.5 0 0 0 2.5-2.5z"/>',
+            "document_search": f'<path {common} d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h8"/><path {common} d="M14 2v6h6"/><circle {common} cx="14" cy="15" r="3"/><path {common} d="m16.5 17.5 3.5 3.5"/>',
+            "document_edit": f'<path {common} d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h8"/><path {common} d="M14 2v6h6"/><path {common} d="M11.5 19.5 20 11l-3-3-8.5 8.5L8 20z"/>',
+            "output": f'<path {common} d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path {common} d="M14 2v6h6"/><path {common} d="M9 15h6"/><path {common} d="M12 12v6"/>',
+            "key": f'<circle {common} cx="7.5" cy="14.5" r="5.5"/><path {common} d="m12 10 8-8"/><path {common} d="m16 6 2 2"/><path {common} d="m18 4 2 2"/>',
+        }
+        if kind == "app":
+            return (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
+                f'<rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="{color}"/>'
+                '<path d="M7 7.25h4.1c.5 0 .9.4.9.9v8.6c0-.7-.6-1.25-1.3-1.25H7z" fill="#FFFFFF"/>'
+                '<path d="M17 7.25h-4.1c-.5 0-.9.4-.9.9v8.6c0-.7.6-1.25 1.3-1.25H17z" fill="#FFFFFF"/>'
+                '<path d="M12 8v9" stroke="#DBEAFE" stroke-width="1.2" stroke-linecap="round"/>'
+                '</svg>'
+            )
+        if kind == "folder":
+            return (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
+                f'<path fill="{color}" d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/>'
+                '</svg>'
+            )
+        if kind == "folder_plus":
+            return (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
+                f'<path fill="{color}" d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/>'
+                '<path d="M12 9v7M8.5 12.5h7" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>'
+                '</svg>'
+            )
+        if kind == "pdf":
+            return (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
+                '<path fill="none" stroke="#EF4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
+                '<path fill="none" stroke="#EF4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 2v6h6"/>'
+                '<path fill="#FEE2E2" stroke="#EF4444" stroke-width="1.5" d="M5 13h14v6H5z"/>'
+                '<path fill="none" stroke="#B91C1C" stroke-width="1.3" stroke-linecap="round" d="M8 17v-2h1.2a1 1 0 0 1 0 2H8m4.2-2v2h.7a1 1 0 0 0 0-2zm4.2 0h2m-2 2h1.4"/>'
+                '</svg>'
+            )
+        if kind == "md":
+            return (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
+                f'<path {common} d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
+                f'<path {common} d="M14 2v6h6"/>'
+                f'<path {common} d="M8 16v-4l2 2 2-2v4"/><path {common} d="M15 12v4"/><path {common} d="m13.5 14.5 1.5 1.5 1.5-1.5"/>'
+                '</svg>'
+            )
+        if kind == "check":
+            return (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
+                '<circle cx="12" cy="12" r="10" fill="#22C55E"/><path d="m7 12 3 3 7-7" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'
+                '</svg>'
+            )
+        if kind == "info":
+            return (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
+                '<circle cx="12" cy="12" r="10" fill="#3B82F6"/><path d="M12 11v6" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round"/><circle cx="12" cy="7.5" r="1.4" fill="#FFFFFF"/>'
+                '</svg>'
+            )
+        body = icons.get(kind, icons["file"])
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">{body}</svg>'
 
     def _build_ui(self) -> None:
         root = QFrame()
@@ -435,8 +371,8 @@ class MainWindow(QMainWindow):
         delete_folder.setObjectName("SidebarAction")
         rename_folder.setObjectName("SidebarAction")
         for button, icon_name, icon_color in [
-            (new_folder, "plus", "#2563EB"),
-            (delete_folder, "trash", "#2563EB"),
+            (new_folder, "folder_plus", "#2563EB"),
+            (delete_folder, "trash", "#EF4444"),
             (rename_folder, "edit", "#2563EB"),
         ]:
             button.setIcon(self._make_icon(icon_name, icon_color))
@@ -500,15 +436,15 @@ class MainWindow(QMainWindow):
 
         upload_box = QFrame()
         upload_box.setObjectName("UploadBox")
-        upload_box.setMinimumHeight(156)
+        upload_box.setMinimumHeight(184)
         upload_layout = QVBoxLayout(upload_box)
         upload_layout.setContentsMargins(26, 18, 26, 18)
-        upload_layout.setSpacing(8)
+        upload_layout.setSpacing(10)
         upload_top = QHBoxLayout()
         upload_top.addStretch(1)
         self.upload_button = QPushButton("上传论文 PDF")
         self.upload_button.setObjectName("OutlineButton")
-        self.upload_button.setMinimumHeight(44)
+        self.upload_button.setMinimumHeight(42)
         self.upload_button.setIcon(self._make_icon("upload", "#FFFFFF"))
         self.upload_button.setIconSize(QSize(18, 18))
         self.upload_button.clicked.connect(self.choose_pdf)
@@ -533,7 +469,7 @@ class MainWindow(QMainWindow):
         workflow_title = QLabel("论文处理工作流")
         workflow_title.setObjectName("SectionTitle")
         workflow_row = QHBoxLayout()
-        workflow_row.setSpacing(12)
+        workflow_row.setSpacing(14)
         self.workflow_badge_parse = QLabel("待处理")
         self.workflow_badge_terms = QLabel("待处理")
         self.workflow_badge_output = QLabel("待处理")
@@ -543,7 +479,8 @@ class MainWindow(QMainWindow):
                 "解析论文结构",
                 "Abstract / Introduction / Methods / Experiments / Tables / Figures",
                 self.workflow_badge_parse,
-            )
+            ),
+            1,
         )
         workflow_row.addWidget(self._make_arrow_label())
         workflow_row.addWidget(
@@ -552,7 +489,8 @@ class MainWindow(QMainWindow):
                 "领域术语与术语翻译",
                 "读取 abstract/introduction，判断领域并构建术语表",
                 self.workflow_badge_terms,
-            )
+            ),
+            1,
         )
         workflow_row.addWidget(self._make_arrow_label())
         workflow_row.addWidget(
@@ -561,7 +499,8 @@ class MainWindow(QMainWindow):
                 "生成输出",
                 "中文译文 Markdown 与 Summary Markdown",
                 self.workflow_badge_output,
-            )
+            ),
+            1,
         )
 
         progress_card = QFrame()
@@ -594,9 +533,8 @@ class MainWindow(QMainWindow):
         self.summary_button.setIcon(self._make_icon("info", "#FFFFFF"))
         self.summary_button.setIconSize(QSize(18, 18))
         self.summary_button.clicked.connect(lambda: self.generate_outputs("summary"))
-        progress_actions.addWidget(self.translate_button)
-        progress_actions.addWidget(self.summary_button)
-        progress_actions.addStretch(1)
+        progress_actions.addWidget(self.translate_button, 1)
+        progress_actions.addWidget(self.summary_button, 1)
         progress_layout.addLayout(progress_header)
         progress_layout.addWidget(self.progress)
         progress_layout.addLayout(progress_actions)
@@ -684,7 +622,7 @@ class MainWindow(QMainWindow):
         self.workspace_splitter.addWidget(self.preview_panel)
         self.workspace_splitter.setStretchFactor(0, 6)
         self.workspace_splitter.setStretchFactor(1, 5)
-        self.workspace_splitter.setSizes([760, 600])
+        self.workspace_splitter.setSizes([790, 570])
 
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(content)
@@ -702,12 +640,13 @@ class MainWindow(QMainWindow):
         arrow.setObjectName("WorkflowArrow")
         arrow.setPixmap(self._make_icon("chevron", "#64748B").pixmap(QSize(22, 22)))
         arrow.setAlignment(Qt.AlignCenter)
-        arrow.setFixedWidth(34)
+        arrow.setFixedWidth(28)
         return arrow
 
     def _make_workflow_card(self, number: str, title: str, body: str, badge: QLabel) -> QFrame:
         card = QFrame()
         card.setObjectName("WorkflowCard")
+        card.setMinimumWidth(200)
         card.setMinimumHeight(128)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 14, 14, 12)
@@ -722,11 +661,11 @@ class MainWindow(QMainWindow):
         step_icon.setObjectName("WorkflowIcon")
         icon_kind = {"1": "document_search", "2": "book", "3": "document_edit"}.get(number, "file")
         icon_color = {"1": "#2563EB", "2": "#7C3AED", "3": "#22C55E"}.get(number, "#2563EB")
-        step_icon.setPixmap(self._make_icon(icon_kind, icon_color).pixmap(QSize(22, 22)))
-        step_icon.setFixedSize(26, 26)
+        step_icon.setPixmap(self._make_icon(icon_kind, icon_color).pixmap(QSize(24, 24)))
+        step_icon.setFixedSize(30, 30)
         title_label = QLabel(title)
         title_label.setObjectName("WorkflowTitle")
-        title_label.setWordWrap(True)
+        title_label.setWordWrap(False)
         header.addWidget(number_label)
         header.addWidget(step_icon)
         header.addWidget(title_label, 1)
@@ -1180,15 +1119,15 @@ class MainWindow(QMainWindow):
             }
             QLabel#DialogTitle {
                 color: #111827;
-                font-size: 18px;
+                font-size: 20px;
                 font-weight: 700;
             }
             QLabel#DialogKeyIcon {
-                min-width: 40px;
-                max-width: 40px;
-                min-height: 40px;
-                max-height: 40px;
-                border-radius: 20px;
+                min-width: 42px;
+                max-width: 42px;
+                min-height: 42px;
+                max-height: 42px;
+                border-radius: 21px;
                 background: #DBEAFE;
                 qproperty-alignment: AlignCenter;
             }
