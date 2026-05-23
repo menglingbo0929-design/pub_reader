@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
 
         self.sidebar_toggle_button = QPushButton()
         self.sidebar_toggle_button.setObjectName("RailButton")
-        self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogListView))
+        self.sidebar_toggle_button.setText("☰")
         self.sidebar_toggle_button.setToolTip("展开/收起目录")
         self.sidebar_toggle_button.setMinimumSize(36, 36)
         self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
@@ -189,13 +189,12 @@ class MainWindow(QMainWindow):
         app_title.setObjectName("AppTitle")
         sidebar_header.addWidget(app_title, 1)
 
-        refresh_button = QPushButton()
-        refresh_button.setObjectName("IconButton")
-        refresh_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
-        refresh_button.setToolTip("刷新目录")
-        refresh_button.setMinimumSize(36, 36)
-        refresh_button.clicked.connect(self.refresh_folders)
-        sidebar_header.addWidget(refresh_button)
+        sidebar_close = QPushButton("‹")
+        sidebar_close.setObjectName("IconButton")
+        sidebar_close.setToolTip("收起目录")
+        sidebar_close.setMinimumSize(36, 36)
+        sidebar_close.clicked.connect(self.toggle_sidebar)
+        sidebar_header.addWidget(sidebar_close)
 
         subtitle = QLabel("英文论文中文阅读工作台")
         subtitle.setObjectName("Subtitle")
@@ -233,10 +232,17 @@ class MainWindow(QMainWindow):
         content.setObjectName("Content")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(28, 24, 28, 24)
-        content_layout.setSpacing(18)
+        content_layout.setSpacing(16)
+
+        top_panel = QFrame()
+        top_panel.setObjectName("TopPanel")
+        top_panel_layout = QVBoxLayout(top_panel)
+        top_panel_layout.setContentsMargins(22, 20, 22, 20)
+        top_panel_layout.setSpacing(14)
 
         header = QHBoxLayout()
         heading_box = QVBoxLayout()
+        heading_box.setSpacing(6)
         heading = QLabel("论文处理")
         heading.setObjectName("PageTitle")
         self.folder_label = QLabel("请选择或新建一个文件夹")
@@ -245,16 +251,13 @@ class MainWindow(QMainWindow):
         heading_box.addWidget(self.folder_label)
 
         self.upload_button = QPushButton("选择 PDF")
-        self.upload_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
         self.upload_button.setMinimumHeight(42)
         self.upload_button.clicked.connect(self.choose_pdf)
         self.translate_button = QPushButton(self.translate_text)
-        self.translate_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         self.translate_button.setObjectName("PrimaryButton")
         self.translate_button.setMinimumHeight(42)
         self.translate_button.clicked.connect(lambda: self.generate_outputs("translation"))
         self.summary_button = QPushButton(self.summary_text)
-        self.summary_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogInfoView))
         self.summary_button.setObjectName("SecondaryActionButton")
         self.summary_button.setMinimumHeight(42)
         self.summary_button.clicked.connect(lambda: self.generate_outputs("summary"))
@@ -272,6 +275,16 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
 
+        top_panel_layout.addLayout(header)
+        top_panel_layout.addWidget(self.selected_pdf_label)
+        top_panel_layout.addWidget(self.progress)
+
+        preview_shell = QFrame()
+        preview_shell.setObjectName("PreviewShell")
+        preview_layout = QVBoxLayout(preview_shell)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(10)
+
         preview_title = QLabel("阅读预览")
         preview_title.setObjectName("SectionTitle")
 
@@ -285,11 +298,11 @@ class MainWindow(QMainWindow):
             "<p>选择左侧论文或导入 PDF 后，PDF、译文 Markdown 和 Summary 会在这里直接预览。</p>"
         )
 
-        content_layout.addLayout(header)
-        content_layout.addWidget(self.selected_pdf_label)
-        content_layout.addWidget(self.progress)
-        content_layout.addWidget(preview_title)
-        content_layout.addWidget(self.detail, 1)
+        preview_layout.addWidget(preview_title)
+        preview_layout.addWidget(self.detail, 1)
+
+        content_layout.addWidget(top_panel)
+        content_layout.addWidget(preview_shell, 1)
 
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(content)
@@ -303,42 +316,50 @@ class MainWindow(QMainWindow):
             QWidget {
                 font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
                 font-size: 14px;
-                color: #17201E;
-                background: #F6F7F8;
+                color: #111827;
+                background: #F4F6F8;
             }
             QLabel {
                 background: transparent;
             }
             QFrame#AppShell {
-                background: #F6F7F8;
+                background: #F4F6F8;
             }
             QFrame#NavRail {
                 min-width: 52px;
                 max-width: 52px;
                 background: #FFFFFF;
-                border-right: 1px solid #E5E7EB;
+                border-right: 1px solid #E6E8EC;
             }
             QFrame#Sidebar {
                 background: #FFFFFF;
-                border-right: 1px solid #E5E7EB;
+                border-right: 1px solid #E6E8EC;
             }
             QFrame#Content {
-                background: #F6F7F8;
+                background: #F4F6F8;
+            }
+            QFrame#TopPanel {
+                background: #FFFFFF;
+                border: 1px solid #E6E8EC;
+                border-radius: 12px;
+            }
+            QFrame#PreviewShell {
+                background: transparent;
             }
             QLabel#AppTitle {
-                font-size: 24px;
+                font-size: 22px;
                 font-weight: 700;
                 color: #111827;
             }
             QLabel#PageTitle {
-                font-size: 25px;
+                font-size: 28px;
                 font-weight: 700;
                 color: #111827;
             }
             QLabel#SectionTitle {
                 font-size: 15px;
                 font-weight: 700;
-                color: #374151;
+                color: #1F2937;
             }
             QLabel#Subtitle, QLabel#HelperText {
                 color: #6B7280;
@@ -350,17 +371,17 @@ class MainWindow(QMainWindow):
                 padding-top: 4px;
             }
             QLabel#SelectedFile {
-                padding: 11px 13px;
-                background: #FFFFFF;
+                padding: 10px 12px;
+                background: #F8FAFC;
                 border: 1px solid #E5E7EB;
                 border-radius: 8px;
                 color: #374151;
             }
             QTextBrowser#PreviewPanel {
-                padding: 22px;
+                padding: 24px;
                 background: #FFFFFF;
-                border: 1px solid #E5E7EB;
-                border-radius: 8px;
+                border: 1px solid #E6E8EC;
+                border-radius: 12px;
                 selection-background-color: #B9E6DE;
             }
             QTextBrowser#PreviewPanel h2 {
@@ -368,18 +389,18 @@ class MainWindow(QMainWindow):
             }
             QTreeWidget {
                 background: #FFFFFF;
-                border: 1px solid #E5E7EB;
-                border-radius: 8px;
-                padding: 6px;
+                border: 1px solid #EEF0F3;
+                border-radius: 10px;
+                padding: 8px;
             }
             QTreeWidget::item {
-                min-height: 38px;
-                padding: 8px;
-                border-radius: 6px;
+                min-height: 36px;
+                padding: 7px 10px;
+                border-radius: 8px;
             }
             QTreeWidget::item:selected {
-                background: #E7F5F2;
-                color: #0F4C47;
+                background: #EEF7F5;
+                color: #0F766E;
             }
             QTreeWidget::branch {
                 image: none;
@@ -387,9 +408,9 @@ class MainWindow(QMainWindow):
             }
             QPushButton {
                 min-height: 36px;
-                padding: 8px 14px;
+                padding: 8px 16px;
                 border-radius: 8px;
-                border: 1px solid #D1D5DB;
+                border: 1px solid #D7DCE2;
                 background: #FFFFFF;
                 color: #111827;
                 font-weight: 600;
@@ -412,15 +433,28 @@ class MainWindow(QMainWindow):
                 padding: 0;
                 border-radius: 8px;
                 border: 1px solid transparent;
-                background: #FFFFFF;
             }
-            QPushButton#RailButton:hover, QPushButton#IconButton:hover {
+            QPushButton#RailButton {
+                color: #111827;
+                background: transparent;
+                font-size: 18px;
+            }
+            QPushButton#IconButton {
+                color: #4B5563;
+                background: #FFFFFF;
+                font-size: 20px;
+            }
+            QPushButton#RailButton:hover {
                 background: #F3F4F6;
-                border: 1px solid #E5E7EB;
+            }
+            QPushButton#IconButton:hover {
+                background: #F3F4F6;
+                border: 1px solid #E6E8EC;
             }
             QPushButton#SidebarAction {
                 min-height: 40px;
                 padding: 8px 10px;
+                background: #F8FAFC;
             }
             QPushButton#PrimaryButton {
                 background: #0F766E;
@@ -445,15 +479,21 @@ class MainWindow(QMainWindow):
                 background: #FFFFFF;
             }
             QProgressBar {
-                min-height: 14px;
-                border: 1px solid #E5E7EB;
-                border-radius: 6px;
-                background: #FFFFFF;
+                min-height: 10px;
+                max-height: 10px;
+                border: 0;
+                border-radius: 5px;
+                background: #E5E7EB;
                 text-align: center;
+                color: transparent;
             }
             QProgressBar::chunk {
-                border-radius: 6px;
+                border-radius: 5px;
                 background: #0F766E;
+            }
+            QSplitter::handle {
+                background: #E6E8EC;
+                width: 1px;
             }
             """
         )
@@ -508,12 +548,12 @@ class MainWindow(QMainWindow):
                 self.last_sidebar_width = sizes[0]
             self.sidebar.hide()
             self.sidebar_visible = False
-            self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+            self.sidebar_toggle_button.setText("☰")
             self.splitter.setSizes([0, max(sum(sizes), 900)])
         else:
             self.sidebar.show()
             self.sidebar_visible = True
-            self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogListView))
+            self.sidebar_toggle_button.setText("☰")
             self.splitter.setSizes([max(self.last_sidebar_width, 260), 900])
 
     def on_preview_link_clicked(self, url: QUrl) -> None:
