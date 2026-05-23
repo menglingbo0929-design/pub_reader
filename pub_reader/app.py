@@ -424,6 +424,13 @@ class MainWindow(QMainWindow):
         except ValueError:
             return False
 
+    def _path_is_inside(self, child: Path, parent: Path) -> bool:
+        try:
+            child.resolve().relative_to(parent.resolve())
+            return True
+        except ValueError:
+            return False
+
     def on_tree_selection_changed(
         self,
         current: QTreeWidgetItem | None,
@@ -525,19 +532,41 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
         try:
+            deleted_current_pdf = self.current_pdf is not None and self._path_is_inside(self.current_pdf, path)
             if path.is_dir():
                 shutil.rmtree(path)
             elif path.exists():
                 path.unlink()
             self.current_folder = None
+            if deleted_current_pdf:
+                self.current_pdf = None
+                self.selected_pdf_label.setText("尚未选择 PDF")
             self.refresh_folders()
         except OSError as exc:
             QMessageBox.critical(self, "删除失败", str(exc))
 
     def choose_pdf(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择英文论文 PDF", "", "PDF Files (*.pdf)")
-        if path:
-            self.current_pdf = Path(path)
+        start_dir = Path.home() / "Desktop"
+        if self.current_pdf and self.current_pdf.exists():
+            start_dir = self.current_pdf.parent
+
+        dialog = QFileDialog(self, "选择英文论文 PDF", str(start_dir), "PDF Files (*.pdf)")
+        # The native Windows dialog keeps stale recent locations after folders
+        # are deleted. Qt's own dialog lets us show only live, predictable entry
+        # points instead of those cached shell shortcuts.
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setFileMode(QFileDialog.ExistingFile)
+        dialog.setNameFilter("PDF Files (*.pdf)")
+        sidebar_paths = [
+            Path.home() / "Desktop",
+            Path.home() / "Documents",
+            self.library.root,
+        ]
+        dialog.setSidebarUrls(
+            [QUrl.fromLocalFile(str(path)) for path in sidebar_paths if path.exists()]
+        )
+        if dialog.exec() == QFileDialog.Accepted and dialog.selectedFiles():
+            self.current_pdf = Path(dialog.selectedFiles()[0])
             self.selected_pdf_label.setText(str(self.current_pdf))
 
     def _enter_processing_state(self, action: str) -> None:

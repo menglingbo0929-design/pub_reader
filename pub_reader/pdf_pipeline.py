@@ -154,7 +154,10 @@ def _extract_plain_text(pdf_path: Path) -> tuple[str, str]:
     with fitz.open(pdf_path) as doc:
         title = _guess_title(doc, pdf_path)
         start_page = _start_page_index(doc)
-        parts = [_clean_text(doc[index].get_text("text")) for index in range(start_page, len(doc))]
+        parts = [
+            _clean_text(_page_plain_text(doc[index], skip_first_page_metadata=(index == 0)))
+            for index in range(start_page, len(doc))
+        ]
     return title, "\n\n".join(part for part in parts if part)
 
 
@@ -298,12 +301,15 @@ def _heading_level(text: str, font_size: float, is_bold: bool, page_font_size: f
     return None
 
 
-def _is_noise_block(text: str, bbox: fitz.Rect, page: fitz.Page) -> bool:
+def _is_noise_block(text: str, bbox: fitz.Rect, page: fitz.Page, font_size: float = 0.0) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
     if re.fullmatch(r"\d+", stripped) and bbox.y0 > page.rect.height * 0.88:
         return True
+    if font_size and font_size <= 9.2 and bbox.y0 > page.rect.height * 0.84:
+        if re.match(r"^\d+\s+", stripped) or "https://" in stripped or "http://" in stripped:
+            return True
     if "arXiv:" in stripped:
         return True
     if stripped.startswith("∗Equal contribution"):
@@ -336,9 +342,9 @@ def _text_blocks_with_heading_levels(page: fitz.Page, skip_first_page_metadata: 
         if not text:
             continue
         bbox = fitz.Rect(block["bbox"])
-        if _is_noise_block(text, bbox, page):
-            continue
         font_size, is_bold = _block_font_stats(block)
+        if _is_noise_block(text, bbox, page, font_size):
+            continue
         elements.append(
             LayoutElement(
                 kind="text",
@@ -534,11 +540,22 @@ def _looks_like_formula_line(line: str) -> bool:
     math_count = sum(1 for char in compact if char in math_chars)
     if re.fullmatch(r"\(?\d+\)?", stripped):
         return True
+    if stripped in {"max", "min"}:
+        return True
+    if re.fullmatch(r"[A-Z]\s+(max|min)", stripped):
+        return True
+    if re.fullmatch(r"[A-Z]", stripped):
+        return True
     if re.fullmatch(r"(max|min|argmax|argmin)\s*[A-Za-z𝑨-𝒁𝐀-𝐙]?", stripped):
         return True
     if math_count >= 2 and any(char in compact for char in "=∼∈σθβλ"):
         return True
     return False
+
+
+def _page_plain_text(page: fitz.Page, skip_first_page_metadata: bool = False) -> str:
+    blocks = _text_blocks_with_heading_levels(page, skip_first_page_metadata)
+    return "\n\n".join(block.text for block in blocks if block.text.strip())
 
 
 def _protect_formula_lines(markdown: str) -> tuple[str, dict[str, str]]:
@@ -567,6 +584,31 @@ def _restore_formula_lines(markdown: str, protected: dict[str, str]) -> str:
     for token, formula in protected.items():
         restored = restored.replace(token, formula)
     return restored
+
+
+def _format_display_formula_lines(markdown: str) -> str:
+    lines = markdown.splitlines()
+    output: list[str] = []
+    in_formula_group = False
+
+    for line in lines:
+        stripped = line.strip()
+        is_formula = _looks_like_formula_line(stripped)
+        if is_formula and not in_formula_group and output and output[-1].strip():
+            output.append("")
+        output.append(stripped if is_formula else line)
+        in_formula_group = is_formula
+        if not is_formula:
+            continue
+
+    formatted: list[str] = []
+    for index, line in enumerate(output):
+        formatted.append(line)
+        if _looks_like_formula_line(line.strip()):
+            next_line = output[index + 1] if index + 1 < len(output) else ""
+            if next_line.strip() and not _looks_like_formula_line(next_line.strip()):
+                formatted.append("")
+    return "\n".join(formatted)
 
 
 def _normalize_marker_lines(markdown: str) -> str:
@@ -778,7 +820,7 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
 
     for page_index in range(start_page, len(doc)):
         page = doc[page_index]
-        plain_text_parts.append(_clean_text(page.get_text("text")))
+        plain_text_parts.append(_clean_text(_page_plain_text(page, skip_first_page_metadata=(page_index == 0))))
 
         for element in _text_only_layout_elements(page, skip_first_page_metadata=(page_index == 0)):
             markdown_parts.append(_markdown_for_text_element(element))
@@ -838,7 +880,9 @@ def generate_translation(
         cancel_check=cancel_check,
     )
     check_cancelled(cancel_check)
-    translated_md = _normalize_marker_lines(_restore_formula_lines("\n\n".join(translated_blocks), protected_formulas))
+    translated_md = _normalize_marker_lines(
+        _format_display_formula_lines(_restore_formula_lines("\n\n".join(translated_blocks), protected_formulas))
+    )
 
     translated_path = paper_dir / "translated.md"
     _write_text_atomic(translated_path, translated_md, cancel_check)
