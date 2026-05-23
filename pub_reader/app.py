@@ -368,8 +368,9 @@ class MainWindow(QMainWindow):
             """
         )
 
-    def refresh_folders(self) -> None:
+    def refresh_folders(self, preferred_path: Path | None = None) -> None:
         self.library_tree.clear()
+        preferred_item: QTreeWidgetItem | None = None
         folders = self.library.list_folders()
         if not folders:
             # The output folder should always have a starter collection.
@@ -381,6 +382,8 @@ class MainWindow(QMainWindow):
             folder_item.setData(0, Qt.UserRole, {"kind": "collection", "folder": folder, "path": folder.path})
             self.library_tree.addTopLevelItem(folder_item)
             folder_item.setExpanded(True)
+            if preferred_path is not None and folder.path.resolve() == preferred_path.resolve():
+                preferred_item = folder_item
             for paper in self.library.list_papers(folder):
                 paper_item = QTreeWidgetItem([paper.name])
                 paper_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
@@ -390,13 +393,27 @@ class MainWindow(QMainWindow):
                     {"kind": "paper", "folder": folder, "paper": paper, "path": paper.path},
                 )
                 folder_item.addChild(paper_item)
-                self._add_file_children(paper_item, paper.path, folder)
-        if self.library_tree.topLevelItemCount():
+                if preferred_path is not None and paper.path.resolve() == preferred_path.resolve():
+                    preferred_item = paper_item
+                file_preferred = self._add_file_children(paper_item, paper.path, folder, preferred_path)
+                if file_preferred is not None:
+                    preferred_item = file_preferred
+        if preferred_item is not None:
+            self.library_tree.setCurrentItem(preferred_item)
+            preferred_item.setExpanded(True)
+        elif self.library_tree.topLevelItemCount():
             self.library_tree.setCurrentItem(self.library_tree.topLevelItem(0))
 
-    def _add_file_children(self, parent_item: QTreeWidgetItem, path: Path, folder: LibraryFolder) -> None:
+    def _add_file_children(
+        self,
+        parent_item: QTreeWidgetItem,
+        path: Path,
+        folder: LibraryFolder,
+        preferred_path: Path | None = None,
+    ) -> QTreeWidgetItem | None:
         if not path.exists() or not path.is_dir():
-            return
+            return None
+        preferred_item: QTreeWidgetItem | None = None
         children = sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
         for child in children:
             if child.name.startswith("."):
@@ -407,8 +424,13 @@ class MainWindow(QMainWindow):
             item.setIcon(0, self.style().standardIcon(icon))
             item.setData(0, Qt.UserRole, {"kind": kind, "folder": folder, "path": child})
             parent_item.addChild(item)
+            if preferred_path is not None and child.resolve() == preferred_path.resolve():
+                preferred_item = item
             if child.is_dir():
-                self._add_file_children(item, child, folder)
+                nested_preferred = self._add_file_children(item, child, folder, preferred_path)
+                if nested_preferred is not None:
+                    preferred_item = nested_preferred
+        return preferred_item
 
     def _selected_data(self) -> dict:
         item = self.library_tree.currentItem()
@@ -537,11 +559,12 @@ class MainWindow(QMainWindow):
                 shutil.rmtree(path)
             elif path.exists():
                 path.unlink()
-            self.current_folder = None
+            preferred_path = path.parent if self._is_inside_library(path.parent) else None
+            self.current_folder = data.get("folder")
             if deleted_current_pdf:
                 self.current_pdf = None
                 self.selected_pdf_label.setText("尚未选择 PDF")
-            self.refresh_folders()
+            self.refresh_folders(preferred_path=preferred_path)
         except OSError as exc:
             QMessageBox.critical(self, "删除失败", str(exc))
 

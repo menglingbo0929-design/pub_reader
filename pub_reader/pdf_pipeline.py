@@ -120,6 +120,14 @@ class LayoutElement:
     heading_level: int | None = None
 
 
+@dataclass
+class EquationCrop:
+    rect: fitz.Rect
+    label: str
+    filename: str
+    primary_number: str
+
+
 CITATION_RE = re.compile(
     r"\s*\[(?:[A-Za-z][A-Za-z0-9]*\+?\d{2,4})(?:\s*[,;]\s*[A-Za-z][A-Za-z0-9]*\+?\d{2,4})*\]"
 )
@@ -488,6 +496,7 @@ def _numbered_equation_segments(
     assets_dir: Path | None,
     page_number: int,
     equation_start: int,
+    equation_rects: dict[str, EquationCrop] | None = None,
 ) -> tuple[list[LayoutElement] | None, int]:
     if assets_dir is None:
         return None, equation_start
@@ -508,15 +517,26 @@ def _numbered_equation_segments(
 
     for number_index in number_indices:
         number_bbox, number_text = lines[number_index]
-        formula_indices: list[int] = []
-        for index, (bbox, text) in enumerate(lines):
-            if index in consumed:
+        number_key = number_text.strip()
+        if equation_rects is not None and number_key in equation_rects:
+            crop = equation_rects[number_key]
+            if crop.primary_number != number_key:
                 continue
-            same_band = bbox.y1 >= number_bbox.y0 - 16 and bbox.y0 <= number_bbox.y1 + 10
-            centered = bbox.x0 > page.rect.width * 0.22 or index == number_index
-            label = bool(re.fullmatch(r"\([A-Za-z][A-Za-z ]+\)", text.strip()))
-            if same_band and centered and (_looks_like_formula_line(text) or label or index == number_index):
-                formula_indices.append(index)
+            formula_indices = [
+                index
+                for index, (bbox, _text) in enumerate(lines)
+                if index not in consumed and (bbox.intersects(crop.rect) or _overlap_ratio(bbox, crop.rect) > 0.2)
+            ]
+        else:
+            formula_indices = []
+            for index, (bbox, text) in enumerate(lines):
+                if index in consumed:
+                    continue
+                same_band = bbox.y1 >= number_bbox.y0 - 16 and bbox.y0 <= number_bbox.y1 + 10
+                centered = bbox.x0 > page.rect.width * 0.22 or index == number_index
+                label = bool(re.fullmatch(r"\([A-Za-z][A-Za-z ]+\)", text.strip()))
+                if same_band and centered and (_looks_like_formula_line(text) or label or index == number_index):
+                    formula_indices.append(index)
         if not formula_indices:
             continue
 
@@ -529,22 +549,31 @@ def _numbered_equation_segments(
                     before_bbox |= lines[index][0]
                 elements.append(LayoutElement(kind="text", bbox=before_bbox, text=before_text))
 
-        formula_bbox = fitz.Rect(lines[formula_indices[0]][0])
-        for index in formula_indices[1:]:
-            formula_bbox |= lines[index][0]
+        formula_bbox = (
+            fitz.Rect(equation_rects[number_key].rect)
+            if equation_rects is not None and number_key in equation_rects
+            else fitz.Rect(lines[formula_indices[0]][0])
+        )
+        if equation_rects is None or number_key not in equation_rects:
+            for index in formula_indices[1:]:
+                formula_bbox |= lines[index][0]
         assets_dir.mkdir(parents=True, exist_ok=True)
         rel_path = _save_page_clip(
             page,
             formula_bbox,
             assets_dir,
-            f"page-{page_number:03d}-equation-{equation_index:02d}",
-            margin=2,
+            equation_rects[number_key].filename if equation_rects is not None and number_key in equation_rects else f"equation_{number_key.strip('()')}",
+            margin=8,
         )
         elements.append(
             LayoutElement(
                 kind="formula_image",
                 bbox=formula_bbox,
-                markdown=f"![Equation {number_text}]({rel_path})",
+                markdown=(
+                    f"![Equation {equation_rects[number_key].label}]({rel_path})"
+                    if equation_rects is not None and number_key in equation_rects
+                    else f"![Equation {number_text}]({rel_path})"
+                ),
             )
         )
         consumed.update(formula_indices)
@@ -564,11 +593,115 @@ def _numbered_equation_segments(
     return elements, equation_index
 
 
+def _page_line_items(page: fitz.Page) -> list[tuple[fitz.Rect, str]]:
+    items: list[tuple[fitz.Rect, str]] = []
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        items.extend(_block_line_items(block))
+    return items
+
+
+def _looks_like_equation_fragment(text: str, bbox: fitz.Rect, page: fitz.Page) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if re.fullmatch(r"\(\d+\)", stripped):
+        return True
+    if re.fullmatch(r"\([A-Za-z][A-Za-z ]+\)", stripped):
+        return True
+    if _looks_like_formula_line(stripped):
+        return True
+    compact = re.sub(r"\s+", "", stripped)
+    math_count = sum(1 for char in compact if char in "=∑∼|{}()[]_\\^+-/*σβθλμ")
+    symbolic = bool(re.search(r"[A-Za-z][_=^({]|[{}]|\\[A-Za-z]+|∑|∼", compact))
+    centered_or_short = bbox.x0 > page.rect.width * 0.16 or len(compact) <= 28
+    return centered_or_short and symbolic and math_count >= 1
+
+
+def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
+    lines = _page_line_items(page)
+    number_lines = [
+        (bbox, text.strip())
+        for bbox, text in lines
+        if re.fullmatch(r"\(\d+\)", text.strip()) and bbox.x0 > page.rect.width * 0.70
+    ]
+    individual: list[tuple[str, fitz.Rect]] = []
+    for number_bbox, number in number_lines:
+        number_center = (number_bbox.y0 + number_bbox.y1) / 2
+
+        candidates: list[fitz.Rect] = [number_bbox]
+        for bbox, text in lines:
+            if bbox == number_bbox:
+                continue
+            center = (bbox.y0 + bbox.y1) / 2
+            nearest_number = min(
+                number_lines,
+                key=lambda item: abs(((item[0].y0 + item[0].y1) / 2) - center),
+            )[1]
+            close_to_number = abs(center - number_center) <= 16
+            left_of_number = bbox.x0 < number_bbox.x0 - 4
+            if (
+                nearest_number == number
+                and close_to_number
+                and left_of_number
+                and _looks_like_equation_fragment(text, bbox, page)
+            ):
+                candidates.append(bbox)
+
+        formula_parts = [bbox for bbox in candidates if bbox != number_bbox]
+        if not formula_parts:
+            continue
+        rect = fitz.Rect(candidates[0])
+        for bbox in candidates[1:]:
+            rect |= bbox
+        individual.append((number, rect))
+
+    individual.sort(key=lambda item: item[1].y0)
+    grouped: list[list[tuple[str, fitz.Rect]]] = []
+    for item in individual:
+        if not grouped:
+            grouped.append([item])
+            continue
+        previous_rect = grouped[-1][-1][1]
+        vertical_gap = item[1].y0 - previous_rect.y1
+        consecutive = int(item[0].strip("()")) == int(grouped[-1][-1][0].strip("()")) + 1
+        if consecutive and vertical_gap <= 18:
+            grouped[-1].append(item)
+        else:
+            grouped.append([item])
+
+    crops: dict[str, EquationCrop] = {}
+    for group in grouped:
+        rect = fitz.Rect(group[0][1])
+        for _number, item_rect in group[1:]:
+            rect |= item_rect
+        numbers = [number.strip("()") for number, _rect in group]
+        filename = f"equation_{'_'.join(numbers)}"
+        label = f"({numbers[0]})" if len(numbers) == 1 else f"({numbers[0]})-({numbers[-1]})"
+        primary = group[0][0]
+        for number, _rect in group:
+            crops[number] = EquationCrop(rect=rect, label=label, filename=filename, primary_number=primary)
+    return crops
+
+
+def _overlaps_any_equation_rect(bbox: fitz.Rect, equation_rects: dict[str, EquationCrop]) -> bool:
+    seen: set[str] = set()
+    for crop in equation_rects.values():
+        if crop.filename in seen:
+            continue
+        seen.add(crop.filename)
+        if bbox.intersects(crop.rect) or _overlap_ratio(bbox, crop.rect) > 0.35:
+            return True
+    return False
+
+
 def _text_blocks_with_heading_levels(
     page: fitz.Page,
     skip_first_page_metadata: bool = False,
     assets_dir: Path | None = None,
     page_number: int = 0,
+    equation_rects: dict[str, EquationCrop] | None = None,
 ) -> list[LayoutElement]:
     raw_blocks = [block for block in page.get_text("dict").get("blocks", []) if block.get("type") == 0]
     font_sizes: list[float] = []
@@ -580,6 +713,7 @@ def _text_blocks_with_heading_levels(
 
     elements: list[LayoutElement] = []
     equation_index = 1
+    equation_rects = equation_rects or {}
     for block in raw_blocks:
         text = _block_text(block)
         if not text:
@@ -588,12 +722,24 @@ def _text_blocks_with_heading_levels(
         font_size, is_bold = _block_font_stats(block)
         if _is_noise_block(text, bbox, page, font_size):
             continue
+        has_equation_number = bool(re.search(r"\(\d+\)\s*$", text))
+        number_match = re.search(r"(\(\d+\))\s*$", text)
+        if (
+            equation_rects
+            and number_match
+            and number_match.group(1) in equation_rects
+            and equation_rects[number_match.group(1)].primary_number != number_match.group(1)
+        ):
+            continue
+        if equation_rects and not has_equation_number and _overlaps_any_equation_rect(bbox, equation_rects):
+            continue
         equation_elements, equation_index = _numbered_equation_segments(
             block,
             page,
             assets_dir,
             page_number,
             equation_index,
+            equation_rects,
         )
         if equation_elements is not None:
             for element in equation_elements:
@@ -710,11 +856,13 @@ def _text_only_layout_elements(
     assets_dir: Path | None = None,
     page_number: int = 0,
 ) -> list[LayoutElement]:
+    equation_rects = _numbered_equation_rects(page) if assets_dir is not None else None
     raw_text_blocks = _text_blocks_with_heading_levels(
         page,
         skip_first_page_metadata,
         assets_dir=assets_dir,
         page_number=page_number,
+        equation_rects=equation_rects,
     )
     caption_blocks = [
         TextBlock(block.bbox, block.text, _caption_kind(block.text))
