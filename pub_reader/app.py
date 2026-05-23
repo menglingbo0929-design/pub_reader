@@ -9,7 +9,7 @@ import html
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QStyle,
     QTextBrowser,
-    QToolBar,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -153,24 +152,51 @@ class MainWindow(QMainWindow):
         self.refresh_folders()
 
     def _build_ui(self) -> None:
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-        refresh_action = QAction("刷新", self)
-        refresh_action.triggered.connect(self.refresh_folders)
-        toolbar.addAction(refresh_action)
+        root = QFrame()
+        root.setObjectName("AppShell")
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        self.setCentralWidget(root)
+
+        self.nav_rail = QFrame()
+        self.nav_rail.setObjectName("NavRail")
+        rail_layout = QVBoxLayout(self.nav_rail)
+        rail_layout.setContentsMargins(8, 10, 8, 10)
+        rail_layout.setSpacing(8)
+
+        self.sidebar_toggle_button = QPushButton()
+        self.sidebar_toggle_button.setObjectName("RailButton")
+        self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogListView))
+        self.sidebar_toggle_button.setToolTip("展开/收起目录")
+        self.sidebar_toggle_button.setMinimumSize(36, 36)
+        self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
+        rail_layout.addWidget(self.sidebar_toggle_button)
+        rail_layout.addStretch()
 
         self.splitter = QSplitter(Qt.Horizontal)
-        self.setCentralWidget(self.splitter)
+        root_layout.addWidget(self.nav_rail)
+        root_layout.addWidget(self.splitter, 1)
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
         sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(16, 16, 16, 16)
-        sidebar_layout.setSpacing(12)
+        sidebar_layout.setContentsMargins(18, 18, 18, 18)
+        sidebar_layout.setSpacing(14)
 
+        sidebar_header = QHBoxLayout()
         app_title = QLabel("Pub Reader")
         app_title.setObjectName("AppTitle")
+        sidebar_header.addWidget(app_title, 1)
+
+        refresh_button = QPushButton()
+        refresh_button.setObjectName("IconButton")
+        refresh_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        refresh_button.setToolTip("刷新目录")
+        refresh_button.setMinimumSize(36, 36)
+        refresh_button.clicked.connect(self.refresh_folders)
+        sidebar_header.addWidget(refresh_button)
+
         subtitle = QLabel("英文论文中文阅读工作台")
         subtitle.setObjectName("Subtitle")
         self.library_tree = QTreeWidget()
@@ -185,6 +211,9 @@ class MainWindow(QMainWindow):
         new_folder = QPushButton("新建")
         rename_folder = QPushButton("重命名")
         delete_folder = QPushButton("删除")
+        new_folder.setObjectName("SidebarAction")
+        rename_folder.setObjectName("SidebarAction")
+        delete_folder.setObjectName("SidebarAction")
         new_folder.clicked.connect(self.create_folder)
         rename_folder.clicked.connect(self.rename_folder)
         delete_folder.clicked.connect(self.delete_folder)
@@ -192,25 +221,21 @@ class MainWindow(QMainWindow):
         folder_buttons.addWidget(rename_folder)
         folder_buttons.addWidget(delete_folder)
 
-        sidebar_layout.addWidget(app_title)
+        sidebar_layout.addLayout(sidebar_header)
         sidebar_layout.addWidget(subtitle)
-        sidebar_layout.addWidget(QLabel("文件夹"))
+        folder_label = QLabel("文件夹")
+        folder_label.setObjectName("SectionLabel")
+        sidebar_layout.addWidget(folder_label)
         sidebar_layout.addWidget(self.library_tree, 1)
         sidebar_layout.addLayout(folder_buttons)
 
         content = QFrame()
         content.setObjectName("Content")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(24, 20, 24, 20)
-        content_layout.setSpacing(16)
+        content_layout.setContentsMargins(28, 24, 28, 24)
+        content_layout.setSpacing(18)
 
         header = QHBoxLayout()
-        self.sidebar_toggle_button = QPushButton("目录")
-        self.sidebar_toggle_button.setObjectName("SidebarToggleButton")
-        self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarShadeButton))
-        self.sidebar_toggle_button.setMinimumHeight(44)
-        self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
-
         heading_box = QVBoxLayout()
         heading = QLabel("论文处理")
         heading.setObjectName("PageTitle")
@@ -221,20 +246,19 @@ class MainWindow(QMainWindow):
 
         self.upload_button = QPushButton("选择 PDF")
         self.upload_button.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
-        self.upload_button.setMinimumHeight(44)
+        self.upload_button.setMinimumHeight(42)
         self.upload_button.clicked.connect(self.choose_pdf)
         self.translate_button = QPushButton(self.translate_text)
         self.translate_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
         self.translate_button.setObjectName("PrimaryButton")
-        self.translate_button.setMinimumHeight(44)
+        self.translate_button.setMinimumHeight(42)
         self.translate_button.clicked.connect(lambda: self.generate_outputs("translation"))
         self.summary_button = QPushButton(self.summary_text)
         self.summary_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogInfoView))
         self.summary_button.setObjectName("SecondaryActionButton")
-        self.summary_button.setMinimumHeight(44)
+        self.summary_button.setMinimumHeight(42)
         self.summary_button.clicked.connect(lambda: self.generate_outputs("summary"))
 
-        header.addWidget(self.sidebar_toggle_button)
         header.addLayout(heading_box, 1)
         header.addWidget(self.upload_button)
         header.addWidget(self.translate_button)
@@ -279,65 +303,72 @@ class MainWindow(QMainWindow):
             QWidget {
                 font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
                 font-size: 14px;
-                color: #113F3B;
-                background: #F6FBF9;
+                color: #17201E;
+                background: #F6F7F8;
             }
-            QToolBar {
-                spacing: 8px;
-                padding: 6px 10px;
-                background: #F9FFFD;
-                border-bottom: 1px solid #DCEDEA;
+            QLabel {
+                background: transparent;
             }
-            QToolBar QToolButton {
-                min-height: 32px;
-                padding: 4px 10px;
-                border-radius: 7px;
-                color: #14524D;
+            QFrame#AppShell {
+                background: #F6F7F8;
+            }
+            QFrame#NavRail {
+                min-width: 52px;
+                max-width: 52px;
+                background: #FFFFFF;
+                border-right: 1px solid #E5E7EB;
             }
             QFrame#Sidebar {
-                background: #EAF7F3;
-                border-right: 1px solid #B7E7DF;
+                background: #FFFFFF;
+                border-right: 1px solid #E5E7EB;
             }
             QFrame#Content {
-                background: #F6FBF9;
+                background: #F6F7F8;
             }
             QLabel#AppTitle {
-                font-size: 28px;
+                font-size: 24px;
                 font-weight: 700;
-                color: #0E4F4A;
+                color: #111827;
             }
             QLabel#PageTitle {
                 font-size: 25px;
                 font-weight: 700;
-                color: #0F4C47;
+                color: #111827;
             }
             QLabel#SectionTitle {
                 font-size: 15px;
                 font-weight: 700;
-                color: #315C58;
+                color: #374151;
             }
             QLabel#Subtitle, QLabel#HelperText {
-                color: #52716D;
+                color: #6B7280;
+            }
+            QLabel#SectionLabel {
+                color: #374151;
+                font-size: 13px;
+                font-weight: 700;
+                padding-top: 4px;
             }
             QLabel#SelectedFile {
                 padding: 11px 13px;
                 background: #FFFFFF;
-                border: 1px solid #CBE5E0;
+                border: 1px solid #E5E7EB;
                 border-radius: 8px;
+                color: #374151;
             }
             QTextBrowser#PreviewPanel {
-                padding: 20px;
+                padding: 22px;
                 background: #FFFFFF;
-                border: 1px solid #CBE5E0;
+                border: 1px solid #E5E7EB;
                 border-radius: 8px;
-                selection-background-color: #BDEFE7;
+                selection-background-color: #B9E6DE;
             }
             QTextBrowser#PreviewPanel h2 {
-                color: #0E4F4A;
+                color: #111827;
             }
             QTreeWidget {
                 background: #FFFFFF;
-                border: 1px solid #CBE5E0;
+                border: 1px solid #E5E7EB;
                 border-radius: 8px;
                 padding: 6px;
             }
@@ -347,8 +378,8 @@ class MainWindow(QMainWindow):
                 border-radius: 6px;
             }
             QTreeWidget::item:selected {
-                background: #CCFBF1;
-                color: #134E4A;
+                background: #E7F5F2;
+                color: #0F4C47;
             }
             QTreeWidget::branch {
                 image: none;
@@ -358,58 +389,71 @@ class MainWindow(QMainWindow):
                 min-height: 36px;
                 padding: 8px 14px;
                 border-radius: 8px;
-                border: 1px solid #91DCD2;
+                border: 1px solid #D1D5DB;
                 background: #FFFFFF;
-                color: #134E4A;
+                color: #111827;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background: #F0FDFA;
+                background: #F3F4F6;
             }
             QPushButton:pressed {
-                background: #CCFBF1;
+                background: #E5E7EB;
             }
             QPushButton:disabled {
-                color: #8BA4A0;
-                background: #EEF6F5;
+                color: #9CA3AF;
+                background: #F3F4F6;
             }
-            QPushButton#SidebarToggleButton {
-                min-width: 76px;
+            QPushButton#RailButton, QPushButton#IconButton {
+                min-width: 36px;
+                max-width: 36px;
+                min-height: 36px;
+                max-height: 36px;
+                padding: 0;
+                border-radius: 8px;
+                border: 1px solid transparent;
                 background: #FFFFFF;
-                border: 1px solid #CBE5E0;
+            }
+            QPushButton#RailButton:hover, QPushButton#IconButton:hover {
+                background: #F3F4F6;
+                border: 1px solid #E5E7EB;
+            }
+            QPushButton#SidebarAction {
+                min-height: 40px;
+                padding: 8px 10px;
             }
             QPushButton#PrimaryButton {
-                background: #0D9488;
+                background: #0F766E;
                 color: #FFFFFF;
-                border: 1px solid #0D9488;
+                border: 1px solid #0F766E;
             }
             QPushButton#PrimaryButton:hover {
-                background: #0F766E;
+                background: #115E59;
             }
             QPushButton#SecondaryActionButton {
-                background: #155E75;
+                background: #1F2937;
                 color: #FFFFFF;
-                border: 1px solid #155E75;
+                border: 1px solid #1F2937;
             }
             QPushButton#SecondaryActionButton:hover {
-                background: #164E63;
+                background: #111827;
             }
             QLineEdit {
-                border: 1px solid #91DCD2;
+                border: 1px solid #D1D5DB;
                 border-radius: 8px;
                 padding: 8px 12px;
                 background: #FFFFFF;
             }
             QProgressBar {
                 min-height: 14px;
-                border: 1px solid #CBE5E0;
+                border: 1px solid #E5E7EB;
                 border-radius: 6px;
                 background: #FFFFFF;
                 text-align: center;
             }
             QProgressBar::chunk {
                 border-radius: 6px;
-                background: #0D9488;
+                background: #0F766E;
             }
             """
         )
@@ -424,32 +468,32 @@ class MainWindow(QMainWindow):
             <style>
                 body {
                     font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-                    color: #113F3B;
+                    color: #17201E;
                     line-height: 1.65;
                     background: #FFFFFF;
                 }
-                h1, h2, h3 { color: #0E4F4A; }
+                h1, h2, h3 { color: #111827; }
                 a { color: #0F766E; text-decoration: none; font-weight: 600; }
-                .muted { color: #607C78; }
+                .muted { color: #6B7280; }
                 .file-card {
                     margin: 14px 0;
                     padding: 14px 16px;
-                    border: 1px solid #D5E9E5;
+                    border: 1px solid #E5E7EB;
                     border-radius: 8px;
-                    background: #F9FFFD;
+                    background: #FAFAFA;
                 }
-                .path { color: #315C58; font-size: 13px; }
+                .path { color: #4B5563; font-size: 13px; }
                 .pdf-page {
                     margin: 18px 0 28px 0;
                     padding: 14px;
-                    border: 1px solid #D5E9E5;
+                    border: 1px solid #E5E7EB;
                     border-radius: 8px;
-                    background: #FDFEFE;
+                    background: #FAFAFA;
                 }
                 .pdf-page img {
                     width: 100%;
                     max-width: 980px;
-                    border: 1px solid #D9E6E3;
+                    border: 1px solid #E5E7EB;
                     background: #FFFFFF;
                 }
             </style>
@@ -464,14 +508,12 @@ class MainWindow(QMainWindow):
                 self.last_sidebar_width = sizes[0]
             self.sidebar.hide()
             self.sidebar_visible = False
-            self.sidebar_toggle_button.setText("展开目录")
-            self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarUnshadeButton))
+            self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
             self.splitter.setSizes([0, max(sum(sizes), 900)])
         else:
             self.sidebar.show()
             self.sidebar_visible = True
-            self.sidebar_toggle_button.setText("目录")
-            self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_TitleBarShadeButton))
+            self.sidebar_toggle_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogListView))
             self.splitter.setSizes([max(self.last_sidebar_width, 260), 900])
 
     def on_preview_link_clicked(self, url: QUrl) -> None:
