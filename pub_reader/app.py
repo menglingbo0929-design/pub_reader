@@ -12,7 +12,7 @@ from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QByteArray, QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
@@ -133,12 +133,18 @@ class WorkerSignals(QObject):
 
 
 class ZoomTextBrowser(QTextBrowser):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._zoom_point_size = self.document().defaultFont().pointSizeF() or 10.0
+
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         if event.modifiers() & Qt.ControlModifier:
-            if event.angleDelta().y() > 0:
-                self.zoomIn(1)
-            else:
-                self.zoomOut(1)
+            step = 0.35 if event.angleDelta().y() > 0 else -0.35
+            self._zoom_point_size = max(7.5, min(22.0, self._zoom_point_size + step))
+            font = self.document().defaultFont()
+            font.setPointSizeF(self._zoom_point_size)
+            self.document().setDefaultFont(font)
+            self.viewport().update()
             event.accept()
             return
         super().wheelEvent(event)
@@ -153,7 +159,7 @@ class ZoomPdfView(QPdfView):
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         if event.modifiers() & Qt.ControlModifier:
-            factor = 1.12 if event.angleDelta().y() > 0 else 0.88
+            factor = 1.04 if event.angleDelta().y() > 0 else 0.96
             self.setZoomMode(QPdfView.ZoomMode.Custom)
             self.setZoomFactor(max(0.25, min(5.0, self.zoomFactor() * factor)))
             event.accept()
@@ -244,6 +250,10 @@ class ProcessPdfTask(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.setAcceptDrops(True)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self.config = load_config()
         self.library = LibraryManager(Path(self.config.library_dir))
         self.thread_pool = QThreadPool.globalInstance()
@@ -1589,6 +1599,50 @@ class MainWindow(QMainWindow):
         }
         for name, button in buttons.items():
             button.setChecked(name == self.current_preview_tab)
+
+    def _event_belongs_to_window(self, obj: QObject | None) -> bool:
+        if obj is self:
+            return True
+        if isinstance(obj, QWidget):
+            return obj.window() is self
+        return False
+
+    def _pdf_path_from_mime(self, mime_data) -> Path | None:
+        if mime_data.hasUrls():
+            for url in mime_data.urls():
+                if not url.isLocalFile():
+                    continue
+                path = Path(url.toLocalFile())
+                if path.is_file() and path.suffix.lower() == ".pdf":
+                    return path
+        if mime_data.hasText():
+            for raw in re.split(r"[\r\n]+", mime_data.text()):
+                candidate = raw.strip().strip('"')
+                if not candidate:
+                    continue
+                url = QUrl(candidate)
+                path = Path(url.toLocalFile()) if url.isLocalFile() else Path(candidate)
+                if path.is_file() and path.suffix.lower() == ".pdf":
+                    return path
+        return None
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() not in {QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop}:
+            return super().eventFilter(obj, event)
+        if not self._event_belongs_to_window(obj):
+            return super().eventFilter(obj, event)
+
+        pdf_path = self._pdf_path_from_mime(event.mimeData())  # type: ignore[attr-defined]
+        if pdf_path is None:
+            return super().eventFilter(obj, event)
+        if self.detail_mode:
+            event.ignore()  # type: ignore[attr-defined]
+            return True
+
+        event.acceptProposedAction()  # type: ignore[attr-defined]
+        if event.type() == QEvent.Type.Drop:
+            self.import_pdf(pdf_path)
+        return True
 
     def set_preview_tab(self, tab: str) -> None:
         self.current_preview_tab = tab
