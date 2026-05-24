@@ -5,12 +5,13 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import fitz
 
 from pub_reader.cancel import CancelCheck, check_cancelled
 from pub_reader.llm import DeepSeekClient, FieldContext
+from pub_reader.markdown_postprocess import sanitize_markdown
 
 
 ProgressCallback = Callable[[str, int], None]
@@ -76,6 +77,62 @@ def _save_field_context(paper_dir: Path, context: FieldContext, cancel_check: Ca
         json.dumps(data, ensure_ascii=False, indent=2),
         cancel_check,
     )
+
+
+def _paper_block_counts(paper_blocks: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for block in paper_blocks:
+        block_type = str(block.get("type", "")).strip() or "unknown"
+        counts[block_type] = counts.get(block_type, 0) + 1
+    return counts
+
+
+def _update_paper_metadata(
+    paper_dir: Path,
+    title: str,
+    field_context: FieldContext,
+    paper_blocks: list[dict[str, Any]],
+    cancel_check: CancelCheck | None = None,
+) -> None:
+    metadata_path = paper_dir / "metadata.json"
+    metadata: dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            loaded = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                metadata = loaded
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+
+    metadata.update(
+        {
+            "title": title,
+            "field_tag": _field_tag(field_context),
+            "field_context": field_context.to_dict(),
+            "block_counts": _paper_block_counts(paper_blocks),
+            "output_layout": {
+                "original_pdf": next((path.name for path in sorted(paper_dir.glob("*.pdf"))), "original.pdf"),
+                "translated_markdown": "translated.md",
+                "summary_markdown": "summary.md",
+                "figures": "figures/",
+                "tables": "tables/",
+            },
+        }
+    )
+    _write_text_atomic(
+        metadata_path,
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        cancel_check,
+    )
+
+
+def _reset_extracted_structure_dirs(paper_dir: Path) -> None:
+    # The current generator writes deterministic figure/table names. Clearing
+    # old extraction folders prevents stale paths from surviving failed runs.
+    for folder_name in ("assets", "figures", "tables"):
+        folder = paper_dir / folder_name
+        if folder.exists():
+            shutil.rmtree(folder)
 
 
 def _get_or_detect_field_context(
@@ -393,7 +450,7 @@ def _save_page_clip(page: fitz.Page, rect: fitz.Rect, assets_dir: Path, name: st
     image_name = f"{name}.png"
     image_path = assets_dir / image_name
     pix.save(image_path)
-    return f"assets/{image_name}"
+    return f"{assets_dir.name}/{image_name}"
 
 
 def _primitive_rects(page: fitz.Page, text_blocks: list[TextBlock]) -> list[Primitive]:
@@ -574,23 +631,12 @@ def _numbered_equation_segments(
         if equation_rects is None or number_key not in equation_rects:
             for index in formula_indices[1:]:
                 formula_bbox |= lines[index][0]
-        assets_dir.mkdir(parents=True, exist_ok=True)
-        rel_path = _save_page_clip(
-            page,
-            formula_bbox,
-            assets_dir,
-            equation_rects[number_key].filename if equation_rects is not None and number_key in equation_rects else f"equation_{number_key.strip('()')}",
-            margin=8,
-        )
+        formula_text = _clean_text("\n".join(lines[index][1] for index in sorted(formula_indices)))
         elements.append(
             LayoutElement(
-                kind="formula_image",
+                kind="equation",
                 bbox=formula_bbox,
-                markdown=(
-                    f"![Equation {equation_rects[number_key].label}]({rel_path})"
-                    if equation_rects is not None and number_key in equation_rects
-                    else f"![Equation {number_text}]({rel_path})"
-                ),
+                text=formula_text,
             )
         )
         consumed.update(formula_indices)
@@ -921,7 +967,7 @@ def _text_only_layout_elements(
     for index, block in enumerate(raw_text_blocks):
         if index in skip_text:
             continue
-        if block.kind == "formula_image":
+        if block.kind == "equation":
             elements.append(block)
             continue
         if _caption_kind(block.text) is not None:
@@ -934,8 +980,8 @@ def _text_only_layout_elements(
 
 def _markdown_for_text_element(element: LayoutElement) -> str:
     text = element.text.strip()
-    if element.kind == "formula_image":
-        return element.markdown
+    if element.kind == "equation":
+        return f"$$\n{_prepare_text_for_model(text)}\n$$"
     if element.kind == "caption_marker":
         return _prepare_text_for_model(text)
     if element.heading_level:
@@ -1285,6 +1331,314 @@ def _layout_elements(page: fitz.Page, page_number: int, assets_dir: Path) -> lis
     return elements
 
 
+def _caption_number(text: str, fallback: int) -> str:
+    match = re.match(
+        r"^(?:fig(?:ure)?\.?|table|algorithm)\s*([A-Za-z0-9][A-Za-z0-9_.-]*)",
+        text.strip(),
+        re.IGNORECASE,
+    )
+    if match:
+        return re.sub(r"[^A-Za-z0-9_]+", "_", match.group(1)).strip("_") or str(fallback)
+    return str(fallback)
+
+
+def _caption_text(group: list[TextBlock]) -> str:
+    return _clean_text(" ".join(block.text.strip() for block in group if block.text.strip()))
+
+
+def _caption_indices(group: list[TextBlock], raw_text_blocks: list[LayoutElement]) -> set[int]:
+    indices: set[int] = set()
+    for caption in group:
+        for index, block in enumerate(raw_text_blocks):
+            if block.text == caption.text and _overlap_ratio(block.bbox, caption.bbox) > 0.75:
+                indices.add(index)
+    return indices
+
+
+def _table_body_indices(
+    group: list[TextBlock],
+    raw_text_blocks: list[LayoutElement],
+    crop_rect: fitz.Rect | None,
+) -> set[int]:
+    group_bbox = group[0].bbox
+    for caption in group[1:]:
+        group_bbox |= caption.bbox
+
+    indices: set[int] = set()
+    for index, block in enumerate(raw_text_blocks):
+        if block.heading_level is not None or block.kind == "equation" or _caption_kind(block.text):
+            continue
+        if crop_rect is not None and _is_inside_caption_visual(block, group_bbox, crop_rect):
+            indices.add(index)
+            continue
+        above_caption = block.bbox.y1 <= group_bbox.y0 + 2
+        close_to_caption = 0 <= group_bbox.y0 - block.bbox.y1 <= 170
+        below_caption = block.bbox.y0 >= group_bbox.y1 - 2
+        close_below = 0 <= block.bbox.y0 - group_bbox.y1 <= 120
+        wide_overlap = _x_overlap_ratio(block.bbox, group_bbox) > 0.18
+        tableish = "\n" in block.text or sum(char.isdigit() for char in block.text) >= 1
+        if wide_overlap and tableish and (above_caption and close_to_caption or below_caption and close_below):
+            indices.add(index)
+    return indices
+
+
+def _split_table_line(line: str) -> list[str]:
+    if "|" in line:
+        parts = [part.strip() for part in line.strip("|").split("|")]
+    else:
+        parts = [part.strip() for part in re.split(r"\s{2,}|\t+", line)]
+    return [part for part in parts if part]
+
+
+def _parse_table_text(text: str) -> tuple[list[str], list[list[str]]]:
+    lines = [_clean_text(line) for line in text.splitlines() if _clean_text(line)]
+    rows = [_split_table_line(line) for line in lines]
+    rows = [row for row in rows if len(row) >= 2]
+    if not rows:
+        return [], []
+    max_width = max(len(row) for row in rows)
+    normalized = [row + [""] * (max_width - len(row)) for row in rows]
+    first_row_numeric = sum(1 for cell in normalized[0] if re.search(r"\d", cell)) >= max(1, max_width // 2)
+    if len(normalized) > 1 and not first_row_numeric:
+        return normalized[0], normalized[1:]
+    return [f"列 {index + 1}" for index in range(max_width)], normalized
+
+
+def _write_table_html(tables_dir: Path, table_id: str, columns: list[str], rows: list[list[str]]) -> str | None:
+    if not columns or not rows:
+        return None
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    html_rows = [
+        "<tr>" + "".join(f"<th>{html_escape(column)}</th>" for column in columns) + "</tr>"
+    ]
+    for row in rows:
+        html_rows.append("<tr>" + "".join(f"<td>{html_escape(cell)}</td>" for cell in row) + "</tr>")
+    path = tables_dir / f"{table_id}.html"
+    path.write_text("<table>\n" + "\n".join(html_rows) + "\n</table>\n", encoding="utf-8")
+    return f"tables/{path.name}"
+
+
+def _write_raw_table_html(tables_dir: Path, table_id: str, content: str) -> str | None:
+    if not content.strip():
+        return None
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    path = tables_dir / f"{table_id}.html"
+    path.write_text(
+        "<table>\n<tr><td>" + html_escape(content).replace("\n", "<br>") + "</td></tr>\n</table>\n",
+        encoding="utf-8",
+    )
+    return f"tables/{path.name}"
+
+
+def html_escape(value: object) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _layout_text_to_block(element: LayoutElement) -> dict[str, Any] | None:
+    text = _prepare_text_for_model(element.text.strip())
+    if not text:
+        return None
+    if element.kind == "equation":
+        return {
+            "type": "equation",
+            "id": "equation",
+            "raw_text": text,
+        }
+    if element.heading_level:
+        return {
+            "type": "heading",
+            "level": max(2, min(4, element.heading_level)),
+            "text": re.sub(r"\s+", " ", text),
+        }
+    return {
+        "type": "paragraph",
+        "text": text,
+    }
+
+
+def _structured_page_blocks(
+    page: fitz.Page,
+    page_number: int,
+    figures_dir: Path,
+    tables_dir: Path,
+    counters: dict[str, int],
+    skip_first_page_metadata: bool = False,
+) -> tuple[list[dict[str, Any]], str, bool]:
+    equation_rects = _numbered_equation_rects(page)
+    raw_text_blocks = _text_blocks_with_heading_levels(
+        page,
+        skip_first_page_metadata,
+        assets_dir=figures_dir,
+        page_number=page_number,
+        equation_rects=equation_rects,
+    )
+    caption_blocks = [
+        TextBlock(block.bbox, block.text, _caption_kind(block.text))
+        for block in raw_text_blocks
+        if block.text and _caption_kind(block.text) is not None
+    ]
+    primitive_text_blocks = [
+        TextBlock(block.bbox, block.text, _caption_kind(block.text))
+        for block in raw_text_blocks
+        if block.text
+    ]
+    primitives = _primitive_rects(page, primitive_text_blocks)
+    skip_text: set[int] = set()
+    positioned_blocks: list[tuple[fitz.Rect, dict[str, Any]]] = []
+    plain_parts: list[str] = []
+    reached_references = False
+
+    for group in _caption_groups(caption_blocks):
+        kind = group[0].caption_kind or "figure"
+        caption = _caption_text(group)
+        crop_rect, _ = _nearest_visual_cluster(page, group, primitives)
+        caption_index = counters.get(kind, 1)
+        caption_number = _caption_number(caption, caption_index)
+        skip_text.update(_caption_indices(group, raw_text_blocks))
+
+        group_bbox = group[0].bbox
+        for caption_block in group[1:]:
+            group_bbox |= caption_block.bbox
+        block_bbox = group_bbox
+        if crop_rect is not None:
+            block_bbox |= crop_rect
+
+        if kind == "figure":
+            figure_id = f"figure_{caption_number}"
+            rel_path = ""
+            if crop_rect is not None and crop_rect.get_area() >= 900:
+                figures_dir.mkdir(parents=True, exist_ok=True)
+                rel_path = _save_page_clip(page, crop_rect, figures_dir, figure_id)
+                for index, block in enumerate(raw_text_blocks):
+                    if _caption_kind(block.text) is None and _overlap_ratio(block.bbox, crop_rect) > 0.35:
+                        skip_text.add(index)
+            positioned_blocks.append(
+                (
+                    block_bbox,
+                    {
+                        "type": "figure",
+                        "id": figure_id,
+                        "path": rel_path,
+                        "caption": caption,
+                    },
+                )
+            )
+            counters[kind] = caption_index + 1
+            continue
+
+        table_kind = "algorithm" if kind == "algorithm" else "table"
+        table_id = f"{table_kind}_{caption_number}"
+        body_indices = _table_body_indices(group, raw_text_blocks, crop_rect)
+        skip_text.update(body_indices)
+        body_blocks = [raw_text_blocks[index] for index in sorted(body_indices, key=lambda i: (raw_text_blocks[i].bbox.y0, raw_text_blocks[i].bbox.x0))]
+        body_text = _clean_text("\n".join(block.text for block in body_blocks))
+        columns, rows = _parse_table_text(body_text)
+        html_path = _write_table_html(tables_dir, table_id, columns, rows) or _write_raw_table_html(
+            tables_dir,
+            table_id,
+            body_text,
+        )
+        table_block: dict[str, Any] = {
+            "type": "table",
+            "id": table_id,
+            "caption": caption,
+            "content": body_text,
+        }
+        if columns and rows:
+            table_block["columns"] = columns
+            table_block["rows"] = rows
+        if html_path:
+            table_block["html_path"] = html_path
+        positioned_blocks.append((block_bbox, table_block))
+        counters[kind] = caption_index + 1
+
+    equation_index = counters.get("equation", 1)
+    for index, element in enumerate(raw_text_blocks):
+        text = element.text.strip()
+        if _is_references_heading(text):
+            reached_references = True
+            break
+        if index in skip_text or _caption_kind(text) is not None:
+            continue
+        block = _layout_text_to_block(element)
+        if block is None:
+            continue
+        if block["type"] == "equation":
+            block["id"] = f"equation_{equation_index}"
+            equation_index += 1
+        positioned_blocks.append((element.bbox, block))
+        if block["type"] in {"heading", "paragraph"}:
+            plain_parts.append(str(block.get("text", "")))
+        elif block["type"] == "equation":
+            plain_parts.append(str(block.get("raw_text", "")))
+    counters["equation"] = equation_index
+
+    positioned_blocks.sort(key=lambda item: (int(item[0].y0 // 8), round(item[0].x0, 1)))
+    return [block for _bbox, block in positioned_blocks], "\n\n".join(plain_parts), reached_references
+
+
+def _serialize_paper_blocks(blocks: list[dict[str, Any]]) -> str:
+    return json.dumps(blocks, ensure_ascii=False, indent=2)
+
+
+def _split_paper_block_chunks(blocks: list[dict[str, Any]], max_chars: int = 22000) -> list[str]:
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_len = 2
+    for block in blocks:
+        encoded = json.dumps(block, ensure_ascii=False)
+        block_len = len(encoded) + 4
+        if current and current_len + block_len > max_chars:
+            chunks.append(current)
+            current = []
+            current_len = 2
+        current.append(block)
+        current_len += block_len
+    if current:
+        chunks.append(current)
+    return [_serialize_paper_blocks(chunk) for chunk in chunks]
+
+
+def extract_structured_paper_blocks(pdf_path: Path, output_dir: Path) -> tuple[str, str, list[dict[str, Any]], list[str]]:
+    doc = fitz.open(pdf_path)
+    start_page = _start_page_index(doc)
+    title = _guess_title(doc, pdf_path)
+    figures_dir = output_dir / "figures"
+    tables_dir = output_dir / "tables"
+    paper_blocks: list[dict[str, Any]] = [{"type": "heading", "level": 1, "text": title}]
+    plain_text_parts: list[str] = [title]
+    counters = {"figure": 1, "table": 1, "algorithm": 1, "equation": 1}
+
+    reached_references = False
+    for page_index in range(start_page, len(doc)):
+        page_blocks, page_plain, reached_references = _structured_page_blocks(
+            doc[page_index],
+            page_index + 1,
+            figures_dir,
+            tables_dir,
+            counters,
+            skip_first_page_metadata=(page_index == 0),
+        )
+        paper_blocks.extend(page_blocks)
+        if page_plain:
+            plain_text_parts.append(page_plain)
+        if reached_references:
+            break
+    doc.close()
+    return (
+        title,
+        "\n\n".join(part for part in plain_text_parts if part),
+        paper_blocks,
+        _split_paper_block_chunks(paper_blocks),
+    )
+
+
 def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, str, list[str], dict[str, str]]:
     doc = fitz.open(pdf_path)
     start_page = _start_page_index(doc)
@@ -1344,12 +1698,11 @@ def generate_translation(
     title, paper_dir, original_pdf = _prepare_paper_workspace(pdf_path, library_folder, progress)
     check_cancelled(cancel_check)
 
-    report("正在抽取译文骨架并截图编号公式", 18)
-    assets_dir = paper_dir / "assets"
-    if assets_dir.exists():
-        shutil.rmtree(assets_dir)
+    report("正在解析 PDF 结构化内容", 18)
+    _reset_extracted_structure_dirs(paper_dir)
     check_cancelled(cancel_check)
-    _skeleton, plain_text, blocks, protected_formulas = extract_markdown_skeleton(original_pdf, paper_dir)
+    parsed_title, plain_text, paper_blocks, block_chunks = extract_structured_paper_blocks(original_pdf, paper_dir)
+    title = parsed_title or title
     sample = plain_text[:9000]
     check_cancelled(cancel_check)
 
@@ -1362,22 +1715,20 @@ def generate_translation(
         cancel_check,
     )
     check_cancelled(cancel_check)
+    _update_paper_metadata(paper_dir, title, field_context, paper_blocks, cancel_check)
 
-    report("正在调用 DeepSeek 翻译纯文本 Markdown", 42)
-    # Translate large Markdown chunks instead of hundreds of small PDF blocks.
-    # Numbered equations are protected as screenshot tokens so their visual
-    # layout stays identical to the PDF.
-    translated_blocks = client.translate_chunks(
-        blocks,
+    report("正在调用 DeepSeek 生成中文译文 Markdown", 42)
+    translated_blocks = client.translate_paper_block_chunks(
+        block_chunks,
         field_context,
         progress=lambda done, total: report(
-            f"正在调用 DeepSeek 翻译纯文本 Markdown（{done}/{total}）",
+            f"正在调用 DeepSeek 生成中文译文 Markdown（{done}/{total}）",
             42 + int((done / max(total, 1)) * 52),
         ),
         cancel_check=cancel_check,
     )
     check_cancelled(cancel_check)
-    translated_md = _postprocess_translated_markdown("\n\n".join(translated_blocks), protected_formulas)
+    translated_md = sanitize_markdown("\n\n".join(translated_blocks), paper_blocks)
 
     translated_path = paper_dir / "translated.md"
     _write_text_atomic(translated_path, translated_md, cancel_check)
@@ -1409,8 +1760,9 @@ def generate_summary(
     title, paper_dir, original_pdf = _prepare_paper_workspace(pdf_path, library_folder, progress)
     check_cancelled(cancel_check)
 
-    report("正在抽取正文用于 Summary", 20)
-    title, plain_text = _extract_plain_text(original_pdf)
+    report("正在解析 PDF 结构化内容用于 Summary", 20)
+    parsed_title, plain_text, paper_blocks, _block_chunks = extract_structured_paper_blocks(original_pdf, paper_dir)
+    title = parsed_title or title
     sample = plain_text[:9000]
     check_cancelled(cancel_check)
 
@@ -1423,12 +1775,19 @@ def generate_summary(
         cancel_check,
     )
     check_cancelled(cancel_check)
+    _update_paper_metadata(paper_dir, title, field_context, paper_blocks, cancel_check)
 
-    report("正在调用 DeepSeek 生成中文 brief summary", 58)
-    summary = _postprocess_summary(
-        client.summarize(plain_text, field_context, cancel_check=cancel_check),
+    report("正在调用 DeepSeek 生成中文 Summary Markdown", 58)
+    summary_raw = client.summarize_blocks(
+        _serialize_paper_blocks(paper_blocks),
+        title,
         field_context,
+        cancel_check=cancel_check,
     )
+    summary_fallback_blocks = [
+        block for block in paper_blocks if str(block.get("type", "")).strip() in {"table", "equation"}
+    ]
+    summary = sanitize_markdown(summary_raw, summary_fallback_blocks)
     summary_path = paper_dir / "summary.md"
     _write_text_atomic(summary_path, summary, cancel_check)
 

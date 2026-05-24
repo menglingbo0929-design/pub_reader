@@ -155,13 +155,47 @@ class DeepSeekClient:
                         {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
                         {
                             "role": "user",
-                            "content": TRANSLATION_USER_PROMPT.format(
-                                field_context=field_text,
-                                text=chunk,
+                            "content": (
+                                f"论文领域信息：\n{field_text}\n\n"
+                                + TRANSLATION_USER_PROMPT.replace(
+                                    "{{paper_blocks}}",
+                                    json.dumps([{"type": "paragraph", "text": chunk}], ensure_ascii=False),
+                                )
                             ),
                         },
                     ],
                     temperature=0.15,
+                    cancel_check=cancel_check,
+                )
+            )
+            check_cancelled(cancel_check)
+            if progress:
+                progress(index, total)
+        return translated
+
+    def translate_paper_block_chunks(
+        self,
+        paper_block_chunks: Iterable[str],
+        field_context: FieldContext,
+        progress: Callable[[int, int], None] | None = None,
+        cancel_check: CancelCheck | None = None,
+    ) -> list[str]:
+        chunk_list = list(paper_block_chunks)
+        translated: list[str] = []
+        total = len(chunk_list)
+        for index, chunk in enumerate(chunk_list, start=1):
+            check_cancelled(cancel_check)
+            content = (
+                f"论文领域信息：\n{field_context.to_prompt_text()}\n\n"
+                + TRANSLATION_USER_PROMPT.replace("{{paper_blocks}}", chunk)
+            )
+            translated.append(
+                self.complete(
+                    [
+                        {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                        {"role": "user", "content": content},
+                    ],
+                    temperature=0.1,
                     cancel_check=cancel_check,
                 )
             )
@@ -178,17 +212,42 @@ class DeepSeekClient:
     ) -> str:
         # Summary uses a capped amount of extracted text to avoid oversized API
         # requests while still covering the main paper structure.
+        blocks = json.dumps(
+            [{"type": "paragraph", "text": paper_text[:55000]}],
+            ensure_ascii=False,
+            indent=2,
+        )
         return self.complete(
             [
                 {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": SUMMARY_USER_PROMPT.format(
-                        field_context=field_context.to_prompt_text(),
-                        text=paper_text[:55000],
+                    "content": SUMMARY_USER_PROMPT.replace("{{paper_title}}", "论文").replace(
+                        "{{paper_blocks}}",
+                        f"论文领域信息：\n{field_context.to_prompt_text()}\n\n{blocks}",
                     ),
                 },
             ],
             temperature=0.25,
+            cancel_check=cancel_check,
+        )
+
+    def summarize_blocks(
+        self,
+        paper_blocks: str,
+        paper_title: str,
+        field_context: FieldContext,
+        cancel_check: CancelCheck | None = None,
+    ) -> str:
+        content = SUMMARY_USER_PROMPT.replace("{{paper_title}}", paper_title).replace(
+            "{{paper_blocks}}",
+            f"论文领域信息：\n{field_context.to_prompt_text()}\n\n{paper_blocks[:55000]}",
+        )
+        return self.complete(
+            [
+                {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.2,
             cancel_check=cancel_check,
         )
