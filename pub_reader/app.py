@@ -14,6 +14,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QObject, QRunnable, QSize, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtPdf import QPdfDocument
+from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,6 +33,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QStackedLayout,
     QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
@@ -129,6 +132,35 @@ class WorkerSignals(QObject):
     canceled = Signal(str)
 
 
+class ZoomTextBrowser(QTextBrowser):
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if event.modifiers() & Qt.ControlModifier:
+            if event.angleDelta().y() > 0:
+                self.zoomIn(1)
+            else:
+                self.zoomOut(1)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+
+class ZoomPdfView(QPdfView):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setPageMode(QPdfView.PageMode.MultiPage)
+        self.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        self.setPageSpacing(12)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if event.modifiers() & Qt.ControlModifier:
+            factor = 1.12 if event.angleDelta().y() > 0 else 0.88
+            self.setZoomMode(QPdfView.ZoomMode.Custom)
+            self.setZoomFactor(max(0.25, min(5.0, self.zoomFactor() * factor)))
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+
 class ProcessPdfTask(QRunnable):
     def __init__(self, pdf_path: Path, folder: LibraryFolder, api_key: str, action: str) -> None:
         super().__init__()
@@ -186,6 +218,9 @@ class MainWindow(QMainWindow):
         self.current_paper: PaperRecord | None = None
         self.current_preview_tab = "pdf"
         self.detail_mode = False
+        self.detail_view_mode = "single"
+        self.dual_left_path: Path | None = None
+        self.dual_right_path: Path | None = None
         self.log_entries: list[tuple[str, str]] = []
         self.last_progress_message = ""
 
@@ -216,6 +251,7 @@ class MainWindow(QMainWindow):
             "trash": f'<path {common} d="M3 6h18"/><path {common} d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path {common} d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path {common} d="M10 11v6"/><path {common} d="M14 11v6"/>',
             "menu": f'<path {common} d="M4 6h16"/><path {common} d="M4 12h16"/><path {common} d="M4 18h16"/>',
             "expand": f'<path {common} d="M15 3h6v6"/><path {common} d="m21 3-7 7"/><path {common} d="M9 21H3v-6"/><path {common} d="m3 21 7-7"/>',
+            "split": f'<rect {common} x="3" y="4" width="18" height="16" rx="2"/><path {common} d="M12 4v16"/><path {common} d="M7 8h2"/><path {common} d="M15 8h2"/><path {common} d="M7 12h2"/><path {common} d="M15 12h2"/>',
             "more": f'<circle fill="{color}" cx="12" cy="5" r="1.7"/><circle fill="{color}" cx="12" cy="12" r="1.7"/><circle fill="{color}" cx="12" cy="19" r="1.7"/>',
             "chevron": f'<path {common} d="m9 18 6-6-6-6"/>',
             "collapse": f'<path {common} d="m11 17-5-5 5-5"/><path {common} d="m18 17-5-5 5-5"/>',
@@ -423,16 +459,9 @@ class MainWindow(QMainWindow):
 
         self.project_status_badge = QLabel("未选择")
         self.project_status_badge.setObjectName("StatusBadge")
-        self.more_button = QPushButton()
-        self.more_button.setObjectName("IconButton")
-        self.more_button.setIcon(self._make_icon("more", "#475569"))
-        self.more_button.setIconSize(QSize(18, 18))
-        self.more_button.setToolTip("更多")
-
         self.workspace_header.addWidget(self.paper_icon_label)
         self.workspace_header.addLayout(heading_box, 1)
         self.workspace_header.addWidget(self.project_status_badge)
-        self.workspace_header.addWidget(self.more_button)
 
         upload_box = QFrame()
         upload_box.setObjectName("UploadBox")
@@ -606,25 +635,44 @@ class MainWindow(QMainWindow):
         self.detail_button.setIconSize(QSize(18, 18))
         self.detail_button.setText("")
         self.detail_button.clicked.connect(self.enter_detail_mode)
+        self.split_detail_button = QPushButton("分页")
+        self.split_detail_button.setObjectName("GhostButton")
+        self.split_detail_button.setIcon(self._make_icon("split", "#2563EB"))
+        self.split_detail_button.setIconSize(QSize(18, 18))
+        self.split_detail_button.clicked.connect(self.enter_dual_detail_mode)
+        self.split_detail_button.hide()
         self.close_detail_button = QPushButton("关闭详情页")
         self.close_detail_button.setObjectName("GhostButton")
         self.close_detail_button.clicked.connect(self.exit_detail_mode)
         self.close_detail_button.hide()
         self.preview_header_layout.addWidget(self.detail_button)
+        self.preview_header_layout.addWidget(self.split_detail_button)
         self.preview_header_layout.addWidget(self.close_detail_button)
 
-        self.detail = QTextBrowser()
+        self.single_preview_frame = QFrame()
+        self.single_preview_frame.setObjectName("SinglePreviewFrame")
+        self.single_preview_stack = QStackedLayout(self.single_preview_frame)
+        self.single_preview_stack.setContentsMargins(0, 0, 0, 0)
+        self.single_preview_stack.setSpacing(0)
+
+        self.detail = ZoomTextBrowser()
         self.detail.setObjectName("PreviewPanel")
         self.detail.setOpenExternalLinks(False)
         self.detail.setOpenLinks(False)
         self.detail.anchorClicked.connect(self.on_preview_link_clicked)
+        self.preview_pdf_doc = QPdfDocument(self)
+        self.preview_pdf_view = ZoomPdfView()
+        self.preview_pdf_view.setObjectName("PdfReader")
+        self.preview_pdf_view.setDocument(self.preview_pdf_doc)
+        self.single_preview_stack.addWidget(self.detail)
+        self.single_preview_stack.addWidget(self.preview_pdf_view)
         self._set_preview_html(
             "<h2>等待论文</h2>"
             "<p>选择左侧论文或导入 PDF 后，PDF、译文 Markdown 和 Summary 会在这里直接预览。</p>"
         )
 
         preview_layout.addWidget(self.preview_header)
-        preview_layout.addWidget(self.detail, 1)
+        preview_layout.addWidget(self.single_preview_frame, 1)
         self.dual_detail_page = self._build_dual_detail_page()
         self.dual_detail_page.hide()
         preview_layout.addWidget(self.dual_detail_page, 1)
@@ -698,7 +746,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(badge)
         return card
 
-    def _make_document_pane(self, title: str) -> tuple[QFrame, QLabel, QTextBrowser]:
+    def _make_document_pane(
+        self,
+        title: str,
+    ) -> tuple[QFrame, QLabel, QStackedLayout, ZoomTextBrowser, ZoomPdfView, QPdfDocument, QPushButton]:
         pane = QFrame()
         pane.setObjectName("DocumentPane")
         pane_layout = QVBoxLayout(pane)
@@ -721,26 +772,31 @@ class MainWindow(QMainWindow):
         expand_button.setIconSize(QSize(18, 18))
         expand_button.setToolTip("展开当前阅读窗口")
 
-        more_button = QPushButton()
-        more_button.setObjectName("PaneIconButton")
-        more_button.setIcon(self._make_icon("more", "#475569"))
-        more_button.setIconSize(QSize(18, 18))
-        more_button.setToolTip("更多")
-
         header_layout.addWidget(title_label)
         header_layout.addStretch(1)
         header_layout.addWidget(expand_button)
-        header_layout.addWidget(more_button)
 
-        reader = QTextBrowser()
+        body = QFrame()
+        body.setObjectName("DocumentPaneBody")
+        body_stack = QStackedLayout(body)
+        body_stack.setContentsMargins(0, 0, 0, 0)
+        body_stack.setSpacing(0)
+
+        reader = ZoomTextBrowser()
         reader.setObjectName("DocumentReader")
         reader.setOpenExternalLinks(False)
         reader.setOpenLinks(False)
         reader.anchorClicked.connect(self.on_preview_link_clicked)
+        pdf_doc = QPdfDocument(self)
+        pdf_view = ZoomPdfView()
+        pdf_view.setObjectName("DocumentPdfReader")
+        pdf_view.setDocument(pdf_doc)
+        body_stack.addWidget(reader)
+        body_stack.addWidget(pdf_view)
 
         pane_layout.addWidget(header)
-        pane_layout.addWidget(reader, 1)
-        return pane, title_label, reader
+        pane_layout.addWidget(body, 1)
+        return pane, title_label, body_stack, reader, pdf_view, pdf_doc, expand_button
 
     def _build_dual_detail_page(self) -> QFrame:
         page = QFrame()
@@ -768,11 +824,6 @@ class MainWindow(QMainWindow):
 
         self.dual_detail_status = QLabel("未选择")
         self.dual_detail_status.setObjectName("StatusBadge")
-        self.dual_detail_more = QPushButton()
-        self.dual_detail_more.setObjectName("IconButton")
-        self.dual_detail_more.setIcon(self._make_icon("more", "#475569"))
-        self.dual_detail_more.setIconSize(QSize(18, 18))
-        self.dual_detail_more.setToolTip("更多")
         self.dual_close_button = QPushButton("关闭详情页")
         self.dual_close_button.setObjectName("GhostButton")
         self.dual_close_button.clicked.connect(self.exit_detail_mode)
@@ -780,14 +831,31 @@ class MainWindow(QMainWindow):
         header.addWidget(self.dual_detail_icon)
         header.addLayout(title_box, 1)
         header.addWidget(self.dual_detail_status)
-        header.addWidget(self.dual_detail_more)
         header.addWidget(self.dual_close_button)
 
         self.dual_reader_splitter = QSplitter(Qt.Horizontal)
         self.dual_reader_splitter.setObjectName("DualReaderSplitter")
         self.dual_reader_splitter.setChildrenCollapsible(False)
-        left_pane, self.dual_left_title, self.dual_left_reader = self._make_document_pane("原论文.pdf")
-        right_pane, self.dual_right_title, self.dual_right_reader = self._make_document_pane("中文译文.md")
+        (
+            left_pane,
+            self.dual_left_title,
+            self.dual_left_stack,
+            self.dual_left_reader,
+            self.dual_left_pdf_view,
+            self.dual_left_pdf_doc,
+            self.dual_left_expand,
+        ) = self._make_document_pane("原论文.pdf")
+        (
+            right_pane,
+            self.dual_right_title,
+            self.dual_right_stack,
+            self.dual_right_reader,
+            self.dual_right_pdf_view,
+            self.dual_right_pdf_doc,
+            self.dual_right_expand,
+        ) = self._make_document_pane("中文译文.md")
+        self.dual_left_expand.clicked.connect(lambda: self.open_dual_pane_as_single("left"))
+        self.dual_right_expand.clicked.connect(lambda: self.open_dual_pane_as_single("right"))
         self.dual_reader_splitter.addWidget(left_pane)
         self.dual_reader_splitter.addWidget(right_pane)
         self.dual_reader_splitter.setStretchFactor(0, 1)
@@ -897,6 +965,10 @@ class MainWindow(QMainWindow):
                 background: #FFFFFF;
                 border-bottom: 1px solid #E2E8F0;
             }
+            QFrame#SinglePreviewFrame, QFrame#DocumentPaneBody {
+                background: #FFFFFF;
+                border: none;
+            }
             QLabel#DocumentPaneTab {
                 min-height: 44px;
                 color: #2563EB;
@@ -911,6 +983,10 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-radius: 0px;
                 selection-background-color: #BFDBFE;
+            }
+            QPdfView#PdfReader, QPdfView#DocumentPdfReader {
+                background: #FFFFFF;
+                border: none;
             }
             QLabel#AppTitle {
                 font-size: 17px;
@@ -1360,6 +1436,8 @@ class MainWindow(QMainWindow):
         body: str,
         base_path: Path | None = None,
     ) -> None:
+        if browser is self.detail:
+            self.single_preview_stack.setCurrentWidget(self.detail)
         base_path = base_path or self.library.root
         browser.setSearchPaths([str(base_path)])
         browser.document().setBaseUrl(QUrl.fromLocalFile(str(base_path) + os.sep))
@@ -1470,7 +1548,7 @@ class MainWindow(QMainWindow):
     def set_preview_tab(self, tab: str) -> None:
         self.current_preview_tab = tab
         self._sync_preview_tabs()
-        if self.detail_mode:
+        if self.detail_mode and self.detail_view_mode == "dual":
             self._render_dual_detail()
         else:
             self._show_current_preview()
@@ -1505,21 +1583,36 @@ class MainWindow(QMainWindow):
 
     def enter_detail_mode(self) -> None:
         self.detail_mode = True
+        self.detail_view_mode = "single"
+        self.work_panel.hide()
+        self.preview_header.show()
+        self.single_preview_frame.show()
+        self.dual_detail_page.hide()
+        self.detail_button.hide()
+        self.split_detail_button.show()
+        self.close_detail_button.show()
+        self._show_current_preview()
+        self._apply_sidebar_width_mode()
+
+    def enter_dual_detail_mode(self) -> None:
+        self.detail_mode = True
+        self.detail_view_mode = "dual"
         self.work_panel.hide()
         self.preview_header.hide()
-        self.detail.hide()
-        self.close_detail_button.hide()
+        self.single_preview_frame.hide()
         self.dual_detail_page.show()
         self._render_dual_detail()
         self._apply_sidebar_width_mode()
 
     def exit_detail_mode(self) -> None:
         self.detail_mode = False
+        self.detail_view_mode = "single"
         self.work_panel.show()
         self.preview_header.show()
-        self.detail.show()
+        self.single_preview_frame.show()
         self.dual_detail_page.hide()
         self.detail_button.show()
+        self.split_detail_button.hide()
         self.close_detail_button.hide()
         self._apply_sidebar_width_mode()
 
@@ -1596,6 +1689,8 @@ class MainWindow(QMainWindow):
         self._preview_markdown_in_browser(path, self.detail)
 
     def _preview_markdown_in_browser(self, path: Path, browser: QTextBrowser) -> None:
+        if browser is self.detail:
+            self.single_preview_stack.setCurrentWidget(self.detail)
         try:
             markdown = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
@@ -1649,77 +1744,54 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"正在预览 Markdown：{path.name}")
 
     def _preview_pdf(self, path: Path) -> None:
-        self._preview_pdf_in_browser(path, self.detail)
+        self._preview_pdf_in_view(path, self.preview_pdf_view, self.preview_pdf_doc)
+        self.single_preview_stack.setCurrentWidget(self.preview_pdf_view)
 
-    def _preview_pdf_in_browser(self, path: Path, browser: QTextBrowser) -> None:
-        try:
-            import fitz
-        except ImportError as exc:
-            self._set_browser_html(
-                browser,
-                "<h2>PDF 预览不可用</h2>"
-                f"<p class='muted'>缺少 PyMuPDF：{html.escape(str(exc))}</p>",
-                path.parent,
-            )
+    def _preview_pdf_in_view(self, path: Path, view: ZoomPdfView, document: QPdfDocument) -> None:
+        document.close()
+        error = document.load(str(path))
+        view.setDocument(document)
+        view.setPageMode(QPdfView.PageMode.MultiPage)
+        view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        if error != QPdfDocument.Error.None_ or document.status() != QPdfDocument.Status.Ready:
+            self.statusBar().showMessage(f"PDF 打开失败：{path.name}")
             return
-
-        cache_dir = path.parent / ".preview" / path.stem
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        pdf_mtime = path.stat().st_mtime
-        pages: list[str] = []
-        doc = fitz.open(str(path))
-        try:
-            total = len(doc)
-            for index, page in enumerate(doc, start=1):
-                image_path = cache_dir / f"page_{index:03d}.png"
-                display_width = max(360, min(900, browser.viewport().width() - 70))
-                if not image_path.exists() or image_path.stat().st_mtime < pdf_mtime:
-                    scale = max(0.7, display_width / max(float(page.rect.width), 1.0))
-                    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-                    pix.save(str(image_path))
-                image_url = QUrl.fromLocalFile(str(image_path)).toString()
-                pages.append(
-                    "<div class='pdf-page'>"
-                    f"<p class='muted'>第 {index} / {total} 页</p>"
-                    f"<img src='{image_url}' width='{display_width}' alt='PDF page {index}' />"
-                    "</div>"
-                )
-                if index % 2 == 0:
-                    QApplication.processEvents()
-        finally:
-            doc.close()
-
-        self._set_browser_html(
-            browser,
-            f"<h2>{html.escape(path.name)}</h2>"
-            "<p class='muted'>PDF 已在程序内渲染为页面预览。</p>"
-            + "".join(pages),
-            cache_dir,
-        )
         self.statusBar().showMessage(f"正在预览 PDF：{path.name}")
 
-    def _preview_path_in_browser(self, path: Path | None, browser: QTextBrowser, empty_title: str) -> None:
+    def _preview_path_in_pane(
+        self,
+        path: Path | None,
+        stack: QStackedLayout,
+        text_browser: ZoomTextBrowser,
+        pdf_view: ZoomPdfView,
+        pdf_doc: QPdfDocument,
+        empty_title: str,
+    ) -> None:
         if path is None or not path.exists():
+            stack.setCurrentWidget(text_browser)
             self._set_browser_html(
-                browser,
+                text_browser,
                 f"<h2>{html.escape(empty_title)}</h2>"
                 "<p class='muted'>当前论文还没有这个文件。</p>",
                 self.library.root,
             )
             return
-        suffix = path.suffix.lower()
-        if suffix == ".md":
-            self._preview_markdown_in_browser(path, browser)
-        elif suffix == ".pdf":
-            self._preview_pdf_in_browser(path, browser)
-        else:
-            self._set_browser_html(
-                browser,
-                f"<h2>{html.escape(path.name)}</h2>"
-                "<p class='muted'>这个文件类型暂不支持内置预览。</p>"
-                f"<p class='path'>{html.escape(str(path))}</p>",
-                path.parent if path.parent.exists() else self.library.root,
-            )
+        if path.suffix.lower() == ".pdf":
+            self._preview_pdf_in_view(path, pdf_view, pdf_doc)
+            stack.setCurrentWidget(pdf_view)
+            return
+        if path.suffix.lower() == ".md":
+            stack.setCurrentWidget(text_browser)
+            self._preview_markdown_in_browser(path, text_browser)
+            return
+        stack.setCurrentWidget(text_browser)
+        self._set_browser_html(
+            text_browser,
+            f"<h2>{html.escape(path.name)}</h2>"
+            "<p class='muted'>这个文件类型暂不支持内置预览。</p>"
+            f"<p class='path'>{html.escape(str(path))}</p>",
+            path.parent if path.parent.exists() else self.library.root,
+        )
 
     def _current_selected_file_path(self) -> Path | None:
         if self.selected_tree_item is None:
@@ -1789,11 +1861,50 @@ class MainWindow(QMainWindow):
         self._set_badge(self.dual_detail_status, "项目健康" if paper else "未选择")
 
         left_path, right_path = self._resolve_dual_detail_paths()
+        self.dual_left_path = left_path
+        self.dual_right_path = right_path
         self.dual_left_title.setText(self._detail_file_label(left_path, "原论文.pdf"))
         self.dual_right_title.setText(self._detail_file_label(right_path, "中文译文.md"))
-        self._preview_path_in_browser(left_path, self.dual_left_reader, "原论文 PDF")
-        self._preview_path_in_browser(right_path, self.dual_right_reader, "中文译文 Markdown")
+        self._preview_path_in_pane(
+            left_path,
+            self.dual_left_stack,
+            self.dual_left_reader,
+            self.dual_left_pdf_view,
+            self.dual_left_pdf_doc,
+            "原论文 PDF",
+        )
+        self._preview_path_in_pane(
+            right_path,
+            self.dual_right_stack,
+            self.dual_right_reader,
+            self.dual_right_pdf_view,
+            self.dual_right_pdf_doc,
+            "中文译文 Markdown",
+        )
         self.dual_reader_splitter.setSizes([640, 640])
+
+    def open_dual_pane_as_single(self, side: str) -> None:
+        path = self.dual_left_path if side == "left" else self.dual_right_path
+        if path is None or not path.exists():
+            return
+        if path.suffix.lower() == ".pdf":
+            self.current_preview_tab = "pdf"
+        elif path.name == "summary.md":
+            self.current_preview_tab = "summary"
+        elif path.name == "translated.md":
+            self.current_preview_tab = "translation"
+        self._sync_preview_tabs()
+        self.detail_mode = True
+        self.detail_view_mode = "single"
+        self.work_panel.hide()
+        self.dual_detail_page.hide()
+        self.preview_header.show()
+        self.single_preview_frame.show()
+        self.detail_button.hide()
+        self.split_detail_button.show()
+        self.close_detail_button.show()
+        self.preview_path(path)
+        self._apply_sidebar_width_mode()
 
     def refresh_folders(self, preferred_path: Path | None = None) -> None:
         self.library_tree.clear()
@@ -2044,7 +2155,7 @@ class MainWindow(QMainWindow):
                 self.current_preview_tab = "summary"
             self._sync_preview_tabs()
             self._show_current_preview()
-        if self.detail_mode:
+        if self.detail_mode and self.detail_view_mode == "dual":
             self._render_dual_detail()
 
     def on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
