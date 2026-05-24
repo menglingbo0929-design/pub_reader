@@ -161,6 +161,47 @@ class ZoomPdfView(QPdfView):
         super().wheelEvent(event)
 
 
+class PdfDropFrame(QFrame):
+    """Upload area that accepts local PDF files dropped from File Explorer."""
+
+    pdf_dropped = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+
+    def _dropped_pdf_path(self, event) -> Path | None:
+        if not event.mimeData().hasUrls():
+            return None
+        for url in event.mimeData().urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_file() and path.suffix.lower() == ".pdf":
+                return path
+        return None
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if self._dropped_pdf_path(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._dropped_pdf_path(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        path = self._dropped_pdf_path(event)
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.pdf_dropped.emit(path)
+
+
 class ProcessPdfTask(QRunnable):
     def __init__(self, pdf_path: Path, folder: LibraryFolder, api_key: str, action: str) -> None:
         super().__init__()
@@ -217,8 +258,11 @@ class MainWindow(QMainWindow):
         self.last_sidebar_width = 300
         self.current_paper: PaperRecord | None = None
         self.current_preview_tab = "pdf"
+        self.current_preview_path: Path | None = None
         self.detail_mode = False
         self.detail_view_mode = "single"
+        self.dual_anchor_path: Path | None = None
+        self.dual_picker_path: Path | None = None
         self.dual_left_path: Path | None = None
         self.dual_right_path: Path | None = None
         self.log_entries: list[tuple[str, str]] = []
@@ -463,9 +507,10 @@ class MainWindow(QMainWindow):
         self.workspace_header.addLayout(heading_box, 1)
         self.workspace_header.addWidget(self.project_status_badge)
 
-        upload_box = QFrame()
+        upload_box = PdfDropFrame()
         upload_box.setObjectName("UploadBox")
         upload_box.setMinimumHeight(184)
+        upload_box.pdf_dropped.connect(self.import_pdf)
         upload_layout = QVBoxLayout(upload_box)
         upload_layout.setContentsMargins(26, 18, 26, 18)
         upload_layout.setSpacing(10)
@@ -1556,6 +1601,7 @@ class MainWindow(QMainWindow):
     def _show_current_preview(self) -> None:
         paper = self.current_paper
         if paper is None:
+            self.current_preview_path = None
             self._set_preview_html(
                 "<h2>等待论文</h2>"
                 "<p class='muted'>请先在左侧选择论文，或在中间区域上传 PDF。</p>"
@@ -1576,6 +1622,7 @@ class MainWindow(QMainWindow):
             "translation": "中文译文 Markdown",
             "summary": "Summary Markdown",
         }[self.current_preview_tab]
+        self.current_preview_path = None
         self._set_preview_html(
             f"<h2>{html.escape(label)} 尚未生成</h2>"
             f"<p class='muted'>当前论文：{html.escape(paper.name)}</p>"
@@ -1591,12 +1638,22 @@ class MainWindow(QMainWindow):
         self.detail_button.hide()
         self.split_detail_button.show()
         self.close_detail_button.show()
-        self._show_current_preview()
+        if self.current_preview_path and self.current_preview_path.exists():
+            self.preview_path(self.current_preview_path)
+        else:
+            self._show_current_preview()
         self._apply_sidebar_width_mode()
 
     def enter_dual_detail_mode(self) -> None:
         self.detail_mode = True
         self.detail_view_mode = "dual"
+        anchor_path = self.current_preview_path
+        if anchor_path is None or not anchor_path.exists():
+            anchor_path = self._current_tab_file_path()
+        if anchor_path is None or anchor_path.suffix.lower() not in {".pdf", ".md"}:
+            anchor_path = self._current_selected_file_path()
+        self.dual_anchor_path = anchor_path if anchor_path and anchor_path.exists() else None
+        self.dual_picker_path = None
         self.work_panel.hide()
         self.preview_header.hide()
         self.single_preview_frame.hide()
@@ -1667,11 +1724,13 @@ class MainWindow(QMainWindow):
 
     def preview_path(self, path: Path) -> None:
         if not path.exists():
+            self.current_preview_path = None
             self._set_preview_html(
                 f"<h2>位置不可用</h2><p class='path'>{html.escape(str(path))}</p>"
             )
             return
 
+        self.current_preview_path = path
         suffix = path.suffix.lower()
         if suffix == ".md":
             self._preview_markdown(path)
@@ -1772,7 +1831,7 @@ class MainWindow(QMainWindow):
             self._set_browser_html(
                 text_browser,
                 f"<h2>{html.escape(empty_title)}</h2>"
-                "<p class='muted'>当前论文还没有这个文件。</p>",
+                "<p class='muted'>请从左侧项目树中选择一个 PDF 或 Markdown 文件。</p>",
                 self.library.root,
             )
             return
@@ -1802,6 +1861,18 @@ class MainWindow(QMainWindow):
         path = Path(data.get("path", ""))
         return path if path.exists() else None
 
+    def _current_tab_file_path(self) -> Path | None:
+        paper = self.current_paper
+        if paper is None:
+            return None
+        if self.current_preview_tab == "pdf":
+            path = paper.original_pdf
+        elif self.current_preview_tab == "summary":
+            path = paper.summary_md
+        else:
+            path = paper.translated_md
+        return path if path and path.exists() else None
+
     def _detail_file_label(self, path: Path | None, fallback: str) -> str:
         if path is None:
             return fallback
@@ -1814,34 +1885,17 @@ class MainWindow(QMainWindow):
         return path.name
 
     def _resolve_dual_detail_paths(self) -> tuple[Path | None, Path | None]:
-        paper = self.current_paper
-        left_path = self.current_pdf if self.current_pdf and self.current_pdf.exists() else None
-        right_path: Path | None = None
-        if paper:
-            left_path = paper.original_pdf if paper.original_pdf and paper.original_pdf.exists() else left_path
-            if self.current_preview_tab == "summary":
-                right_path = paper.summary_md if paper.summary_md and paper.summary_md.exists() else None
-            else:
-                right_path = paper.translated_md if paper.translated_md and paper.translated_md.exists() else None
-            if right_path is None and paper.summary_md and paper.summary_md.exists():
-                right_path = paper.summary_md
-            if right_path is None and paper.translated_md and paper.translated_md.exists():
-                right_path = paper.translated_md
-
-        selected_path = self._current_selected_file_path()
-        if selected_path:
-            if selected_path.suffix.lower() == ".pdf":
-                left_path = selected_path
-            elif selected_path.suffix.lower() == ".md":
-                right_path = selected_path
+        left_path = self.dual_anchor_path if self.dual_anchor_path and self.dual_anchor_path.exists() else None
+        right_path = self.dual_picker_path if self.dual_picker_path and self.dual_picker_path.exists() else None
         return left_path, right_path
 
     def _render_dual_detail(self) -> None:
+        left_path, right_path = self._resolve_dual_detail_paths()
         paper = self.current_paper
-        selected_path = self._current_selected_file_path()
-        if paper is None and selected_path and selected_path.parent.exists():
-            title = selected_path.parent.name
-            meta = f"位置：{selected_path.parent}"
+        if left_path and left_path.parent.exists():
+            title = left_path.parent.name
+            right_name = right_path.name if right_path else "请从左侧选择第二个文件"
+            meta = f"左栏：{left_path.name}    |    右栏：{right_name}"
         elif paper:
             title = paper.name
             try:
@@ -1854,24 +1908,23 @@ class MainWindow(QMainWindow):
             meta = f"位置：{self.current_folder.path}"
         else:
             title = "等待论文"
-            meta = "请先在左侧选择论文，或上传新的 PDF。"
+            meta = "请先在单页详情里打开一个文件，再点击分页。"
 
         self.dual_detail_title.setText(title)
         self.dual_detail_meta.setText(meta)
-        self._set_badge(self.dual_detail_status, "项目健康" if paper else "未选择")
+        self._set_badge(self.dual_detail_status, "双栏阅读" if left_path else "未选择")
 
-        left_path, right_path = self._resolve_dual_detail_paths()
         self.dual_left_path = left_path
         self.dual_right_path = right_path
-        self.dual_left_title.setText(self._detail_file_label(left_path, "原论文.pdf"))
-        self.dual_right_title.setText(self._detail_file_label(right_path, "中文译文.md"))
+        self.dual_left_title.setText(self._detail_file_label(left_path, "当前文件"))
+        self.dual_right_title.setText(self._detail_file_label(right_path, "从左侧选择文件"))
         self._preview_path_in_pane(
             left_path,
             self.dual_left_stack,
             self.dual_left_reader,
             self.dual_left_pdf_view,
             self.dual_left_pdf_doc,
-            "原论文 PDF",
+            "当前文件",
         )
         self._preview_path_in_pane(
             right_path,
@@ -1879,7 +1932,7 @@ class MainWindow(QMainWindow):
             self.dual_right_reader,
             self.dual_right_pdf_view,
             self.dual_right_pdf_doc,
-            "中文译文 Markdown",
+            "从左侧选择文件",
         )
         self.dual_reader_splitter.setSizes([640, 640])
 
@@ -2113,6 +2166,7 @@ class MainWindow(QMainWindow):
 
         kind = data.get("kind")
         if kind == "resource_root":
+            self.current_preview_path = None
             self._set_preview_html(
                 "<h2>资源库</h2>"
                 "<p class='muted'>选择一个文件夹或论文项目后，右侧会显示原论文、译文或 Summary 预览。</p>"
@@ -2120,6 +2174,7 @@ class MainWindow(QMainWindow):
                 self.library.root,
             )
         elif kind == "recycle":
+            self.current_preview_path = None
             self._set_preview_html(
                 "<h2>回收站</h2>"
                 "<p class='muted'>删除操作会优先移动到系统回收站。</p>",
@@ -2127,6 +2182,7 @@ class MainWindow(QMainWindow):
             )
         elif kind == "collection":
             self.current_pdf = None
+            self.current_preview_path = None
             self._update_work_panel_for_paper(None)
             self._set_preview_html(
                 f"<h2>{folder.name}</h2>"
@@ -2136,12 +2192,19 @@ class MainWindow(QMainWindow):
             )
         elif kind == "paper":
             paper = data["paper"]
+            if self.detail_mode and self.detail_view_mode == "dual":
+                return
             self._update_work_panel_for_paper(paper)
             self.current_preview_tab = "pdf"
             self._sync_preview_tabs()
             self._show_current_preview()
         elif kind in {"file", "dir"}:
             path = Path(data["path"])
+            if self.detail_mode and self.detail_view_mode == "dual":
+                if kind == "file" and path.suffix.lower() in {".pdf", ".md"}:
+                    self.dual_picker_path = path
+                    self._render_dual_detail()
+                return
             paper = data.get("paper")
             if paper:
                 self._update_work_panel_for_paper(paper)
@@ -2155,8 +2218,6 @@ class MainWindow(QMainWindow):
                 self.current_preview_tab = "summary"
             self._sync_preview_tabs()
             self._show_current_preview()
-        if self.detail_mode and self.detail_view_mode == "dual":
-            self._render_dual_detail()
 
     def on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         data = item.data(0, Qt.UserRole) or {}
@@ -2286,22 +2347,32 @@ class MainWindow(QMainWindow):
             [QUrl.fromLocalFile(str(path)) for path in sidebar_paths if path.exists()]
         )
         if dialog.exec() == QFileDialog.Accepted and dialog.selectedFiles():
-            selected_pdf = Path(dialog.selectedFiles()[0])
-            if self.current_folder is None:
-                self.current_folder = self.library.list_folders()[0]
-            try:
-                _title, paper_dir, original_pdf = _prepare_paper_workspace(
-                    selected_pdf,
-                    self.current_folder.path,
-                    lambda _msg, _value: None,
-                )
-            except Exception as exc:
-                QMessageBox.critical(self, "上传失败", str(exc))
-                return
-            self.current_pdf = original_pdf
-            self._set_selected_pdf_label(self.current_pdf)
-            self._append_log(f"已上传论文 PDF：{original_pdf.name}")
-            self.refresh_folders(preferred_path=paper_dir)
+            self.import_pdf(Path(dialog.selectedFiles()[0]))
+
+    def import_pdf(self, selected_pdf: Path) -> None:
+        if selected_pdf.suffix.lower() != ".pdf" or not selected_pdf.exists():
+            QMessageBox.warning(self, "需要 PDF", "请拖入或选择一个有效的 PDF 文件。")
+            return
+        if self.current_folder is None:
+            folders = self.library.list_folders()
+            if not folders:
+                self.library.create_folder("默认文件夹")
+                folders = self.library.list_folders()
+            self.current_folder = folders[0]
+        try:
+            _title, paper_dir, original_pdf = _prepare_paper_workspace(
+                selected_pdf,
+                self.current_folder.path,
+                lambda _msg, _value: None,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "上传失败", str(exc))
+            return
+        self.current_pdf = original_pdf
+        self.current_preview_path = original_pdf
+        self._set_selected_pdf_label(self.current_pdf)
+        self._append_log(f"已上传论文 PDF：{original_pdf.name}")
+        self.refresh_folders(preferred_path=paper_dir)
 
     def _enter_processing_state(self, action: str) -> None:
         self.active_action = action
@@ -2432,6 +2503,7 @@ class MainWindow(QMainWindow):
             self.preview_path(path)
             return
         kind = "文件夹" if path.is_dir() else "文件"
+        self.current_preview_path = None
         self._set_preview_html(
             f"<h2>{html.escape(path.name)}</h2>"
             f"<p class='muted'>已选中{kind}。双击左侧文件夹会展开或收起；Markdown/PDF 文件会在这里预览。</p>"
