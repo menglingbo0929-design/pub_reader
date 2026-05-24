@@ -7,6 +7,14 @@ from typing import Any, Mapping, Sequence
 
 PaperBlock = Mapping[str, Any]
 
+REFERENCE_CITATION_RE = re.compile(
+    r"\s*\[(?:"
+    r"[A-Za-z][A-Za-z0-9]*\+?\d{2,4}(?:\s*[,;]\s*[A-Za-z][A-Za-z0-9]*\+?\d{2,4})*"
+    r"|"
+    r"\d{1,4}(?:\s*[,;]\s*\d{1,4})*"
+    r")\]"
+)
+
 
 def _block_text(block: PaperBlock, key: str) -> str:
     value = block.get(key, "")
@@ -57,6 +65,8 @@ def render_table_block_to_markdown(table_block: PaperBlock) -> str:
     raw_content = _block_text(table_block, "content") or _block_text(table_block, "raw_text")
     if not columns or not normalized_rows:
         if raw_content:
+            if raw_content.count("\n") > 20:
+                return f"{heading}\n\n> 表格未能从 PDF 中可靠解析，请参考原 PDF 对应表格。"
             return f"{heading}\n\n<table>\n<tr><td>{_escape_html_cell(raw_content)}</td></tr>\n</table>"
         return f"{heading}\n\n> 表格未能从 PDF 中可靠解析。"
 
@@ -99,6 +109,11 @@ def render_figure_block_to_markdown(figure_block: PaperBlock) -> str:
 
 
 def render_equation_block_to_markdown(equation_block: PaperBlock) -> str:
+    path = _block_text(equation_block, "path")
+    number = _block_number(equation_block)
+    label = f"公式 {number}" if number else "公式"
+    if path:
+        return f"![{label}]({path})"
     latex = _block_text(equation_block, "latex")
     raw_text = _block_text(equation_block, "raw_text") or _block_text(equation_block, "text")
     formula = latex or raw_text
@@ -133,6 +148,68 @@ def _remove_references_section(markdown: str) -> str:
         markdown,
         flags=re.DOTALL,
     ).strip()
+
+
+def _strip_reference_citations(markdown: str) -> str:
+    text = REFERENCE_CITATION_RE.sub("", markdown)
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r" +([,.;:，。；：）)])", r"\1", text)
+    return text
+
+
+def _plain_inline_math(math: str) -> str:
+    text = math.strip()
+    text = re.sub(r"\\(?:text|mathrm|operatorname)\{([^{}]+)\}", r"\1", text)
+    text = re.sub(r"\\mathbb\{([^{}]+)\}", r"\1", text)
+    text = re.sub(r"\\mathcal\{([^{}]+)\}", r"\1", text)
+    replacements = {
+        r"\cdot": "·",
+        r"\times": "×",
+        r"\leq": "≤",
+        r"\geq": "≥",
+        r"\neq": "≠",
+        r"\approx": "≈",
+        r"\sim": "∼",
+        r"\pi": "π",
+        r"\theta": "θ",
+        r"\lambda": "λ",
+        r"\alpha": "α",
+        r"\beta": "β",
+        r"\gamma": "γ",
+        r"\sigma": "σ",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    text = text.replace("\\_", "_")
+    text = re.sub(r"\\([A-Za-z]+)", r"\1", text)
+    text = text.replace("{", "").replace("}", "")
+    text = text.replace("^+", "⁺").replace("^-", "⁻")
+    return text.strip()
+
+
+def _normalize_inline_math_for_preview(markdown: str) -> str:
+    return re.sub(r"\\\((.+?)\\\)", lambda match: _plain_inline_math(match.group(1)), markdown)
+
+
+def _replace_display_math_with_equation_images(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
+    equations = [
+        block for block in paper_blocks
+        if _block_text(block, "type") == "equation" and _block_text(block, "path")
+    ]
+    if not equations:
+        return markdown
+
+    index = 0
+
+    def repl(match: re.Match[str]) -> str:
+        nonlocal index
+        if index >= len(equations):
+            return match.group(0)
+        rendered = render_equation_block_to_markdown(equations[index])
+        index += 1
+        return rendered
+
+    return re.sub(r"\$\$\s*.*?\s*\$\$", repl, markdown, flags=re.DOTALL)
 
 
 def _normalize_spacing(markdown: str) -> str:
@@ -190,7 +267,10 @@ def _append_missing_structures(markdown: str, paper_blocks: Sequence[PaperBlock]
         elif block_type == "equation":
             latex = _block_text(block, "latex")
             raw = _block_text(block, "raw_text")
-            if latex and latex not in markdown:
+            path = _block_text(block, "path")
+            if path and path not in markdown:
+                additions.append(render_equation_block_to_markdown(block))
+            elif latex and latex not in markdown:
                 additions.append(render_equation_block_to_markdown(block))
             elif not latex and raw and raw not in markdown and "$$" not in markdown:
                 additions.append(render_equation_block_to_markdown(block))
@@ -200,10 +280,21 @@ def _append_missing_structures(markdown: str, paper_blocks: Sequence[PaperBlock]
     return markdown.rstrip() + "\n\n## 结构化内容兜底\n\n" + "\n\n".join(additions) + "\n"
 
 
-def sanitize_markdown(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
+def sanitize_markdown(
+    markdown: str,
+    paper_blocks: Sequence[PaperBlock],
+    *,
+    render_equation_images: bool = False,
+    normalize_inline_math: bool = False,
+) -> str:
     text = _strip_code_fence(markdown)
     text = _strip_preface(text)
     text = _remove_references_section(text)
+    text = _strip_reference_citations(text)
     text = _ensure_display_math_pairs(text)
+    if render_equation_images:
+        text = _replace_display_math_with_equation_images(text, paper_blocks)
+    if normalize_inline_math:
+        text = _normalize_inline_math_for_preview(text)
     text = _append_missing_structures(text, paper_blocks)
     return _normalize_spacing(text)

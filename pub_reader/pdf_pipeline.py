@@ -186,7 +186,11 @@ class EquationCrop:
 
 
 CITATION_RE = re.compile(
-    r"\s*\[(?:[A-Za-z][A-Za-z0-9]*\+?\d{2,4})(?:\s*[,;]\s*[A-Za-z][A-Za-z0-9]*\+?\d{2,4})*\]"
+    r"\s*\[(?:"
+    r"[A-Za-z][A-Za-z0-9]*\+?\d{2,4}(?:\s*[,;]\s*[A-Za-z][A-Za-z0-9]*\+?\d{2,4})*"
+    r"|"
+    r"\d{1,4}(?:\s*[,;]\s*\d{1,4})*"
+    r")\]"
 )
 
 
@@ -272,6 +276,20 @@ def _guess_title(doc: fitz.Document, pdf_path: Path) -> str:
 
     first_page = doc[0].get_text("text") if len(doc) else pdf_path.stem
     lines = [line.strip() for line in first_page.splitlines() if line.strip()]
+    title_lines: list[str] = []
+    for line in lines[:8]:
+        if re.match(r"^(abstract|introduction)\b", line, re.IGNORECASE):
+            break
+        if any(token in line for token in ["@", "{", "}", "http://", "https://"]):
+            break
+        if "," in line or re.search(r"\d", line):
+            break
+        if 4 <= len(line) <= 90:
+            title_lines.append(line)
+            continue
+        break
+    if title_lines:
+        return _clean_text(" ".join(title_lines))[:160]
     candidates = [line for line in lines[:12] if 8 <= len(line) <= 180]
     return candidates[0] if candidates else pdf_path.stem
 
@@ -353,7 +371,7 @@ def _extract_plain_text(pdf_path: Path) -> tuple[str, str]:
             page = doc[index]
             page_parts: list[str] = []
             for element in _text_blocks_with_heading_levels(page, skip_first_page_metadata=(index == 0)):
-                if _is_references_heading(element.text):
+                if element.heading_level is not None and _is_references_heading(element.text):
                     reached_references = True
                     break
                 if element.text.strip():
@@ -544,6 +562,14 @@ def _is_noise_block(text: str, bbox: fitz.Rect, page: fitz.Page, font_size: floa
         return True
     if re.fullmatch(r"\d+", stripped) and bbox.y0 > page.rect.height * 0.88:
         return True
+    if bbox.y0 > page.rect.height * 0.82 and re.search(
+        r"(NeurIPS|Conference on Neural Information Processing Systems|Proceedings|arXiv|"
+        r"Equal contribution|Contact person|Corresponding author|Project Page|Code:|"
+        r"https?://)",
+        stripped,
+        re.IGNORECASE,
+    ):
+        return True
     if font_size and font_size <= 9.2 and bbox.y0 > page.rect.height * 0.84:
         if re.match(r"^\d+\s+", stripped) or "https://" in stripped or "http://" in stripped:
             return True
@@ -560,6 +586,14 @@ def _first_body_y(blocks: list[LayoutElement], page: fitz.Page) -> float | None:
     for block in blocks:
         text = block.text.strip()
         if len(text) >= 180 and block.heading_level is None and block.bbox.y0 < page.rect.height * 0.65:
+            return block.bbox.y0
+    return None
+
+
+def _abstract_start_y(blocks: list[LayoutElement]) -> float | None:
+    for block in blocks:
+        text = re.sub(r"\s+", " ", block.text.strip())
+        if re.match(r"^(abstract|摘要)\b", text, re.IGNORECASE):
             return block.bbox.y0
     return None
 
@@ -632,11 +666,18 @@ def _numbered_equation_segments(
             for index in formula_indices[1:]:
                 formula_bbox |= lines[index][0]
         formula_text = _clean_text("\n".join(lines[index][1] for index in sorted(formula_indices)))
+        rel_path = ""
+        if equation_rects is not None and number_key in equation_rects:
+            crop = equation_rects[number_key]
+            figures_dir = assets_dir
+            figures_dir.mkdir(parents=True, exist_ok=True)
+            rel_path = _save_page_clip(page, formula_bbox, figures_dir, crop.filename, margin=8)
         elements.append(
             LayoutElement(
                 kind="equation",
                 bbox=formula_bbox,
                 text=formula_text,
+                markdown=rel_path,
             )
         )
         consumed.update(formula_indices)
@@ -819,7 +860,7 @@ def _text_blocks_with_heading_levels(
             )
         )
     if skip_first_page_metadata:
-        first_body_y = _first_body_y(elements, page)
+        first_body_y = _abstract_start_y(elements) or _first_body_y(elements, page)
         if first_body_y is not None:
             elements = [
                 element
@@ -1445,11 +1486,14 @@ def _layout_text_to_block(element: LayoutElement) -> dict[str, Any] | None:
     if not text:
         return None
     if element.kind == "equation":
-        return {
+        block: dict[str, Any] = {
             "type": "equation",
             "id": "equation",
             "raw_text": text,
         }
+        if element.markdown:
+            block["path"] = element.markdown
+        return block
     if element.heading_level:
         return {
             "type": "heading",
@@ -1561,11 +1605,11 @@ def _structured_page_blocks(
     equation_index = counters.get("equation", 1)
     for index, element in enumerate(raw_text_blocks):
         text = element.text.strip()
-        if _is_references_heading(text):
-            reached_references = True
-            break
         if index in skip_text or _caption_kind(text) is not None:
             continue
+        if element.heading_level is not None and _is_references_heading(text):
+            reached_references = True
+            break
         block = _layout_text_to_block(element)
         if block is None:
             continue
@@ -1658,7 +1702,7 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
             assets_dir=assets_dir,
             page_number=page_index + 1,
         ):
-            if _is_references_heading(element.text):
+            if element.heading_level is not None and _is_references_heading(element.text):
                 reached_references = True
                 break
             if element.text.strip():
@@ -1787,7 +1831,12 @@ def generate_summary(
     summary_fallback_blocks = [
         block for block in paper_blocks if str(block.get("type", "")).strip() in {"table", "equation"}
     ]
-    summary = sanitize_markdown(summary_raw, summary_fallback_blocks)
+    summary = sanitize_markdown(
+        summary_raw,
+        summary_fallback_blocks,
+        render_equation_images=True,
+        normalize_inline_math=True,
+    )
     summary_path = paper_dir / "summary.md"
     _write_text_atomic(summary_path, summary, cancel_check)
 
