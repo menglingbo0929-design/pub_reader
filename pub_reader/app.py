@@ -573,7 +573,9 @@ class MainWindow(QMainWindow):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
 
-        self.preview_header_layout = QHBoxLayout()
+        self.preview_header = QFrame()
+        self.preview_header.setObjectName("PreviewToolbar")
+        self.preview_header_layout = QHBoxLayout(self.preview_header)
         self.preview_header_layout.setContentsMargins(18, 14, 18, 10)
         self.preview_header_layout.setSpacing(8)
         self.preview_tab_pdf = QPushButton("原论文预览")
@@ -621,8 +623,11 @@ class MainWindow(QMainWindow):
             "<p>选择左侧论文或导入 PDF 后，PDF、译文 Markdown 和 Summary 会在这里直接预览。</p>"
         )
 
-        preview_layout.addLayout(self.preview_header_layout)
+        preview_layout.addWidget(self.preview_header)
         preview_layout.addWidget(self.detail, 1)
+        self.dual_detail_page = self._build_dual_detail_page()
+        self.dual_detail_page.hide()
+        preview_layout.addWidget(self.dual_detail_page, 1)
 
         self.workspace_splitter.addWidget(self.work_panel)
         self.workspace_splitter.addWidget(self.preview_panel)
@@ -692,6 +697,106 @@ class MainWindow(QMainWindow):
         layout.addWidget(body_label, 1)
         layout.addWidget(badge)
         return card
+
+    def _make_document_pane(self, title: str) -> tuple[QFrame, QLabel, QTextBrowser]:
+        pane = QFrame()
+        pane.setObjectName("DocumentPane")
+        pane_layout = QVBoxLayout(pane)
+        pane_layout.setContentsMargins(0, 0, 0, 0)
+        pane_layout.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("DocumentPaneHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 0, 8, 0)
+        header_layout.setSpacing(8)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("DocumentPaneTab")
+        title_label.setMinimumHeight(44)
+
+        expand_button = QPushButton()
+        expand_button.setObjectName("PaneIconButton")
+        expand_button.setIcon(self._make_icon("expand", "#334155"))
+        expand_button.setIconSize(QSize(18, 18))
+        expand_button.setToolTip("展开当前阅读窗口")
+
+        more_button = QPushButton()
+        more_button.setObjectName("PaneIconButton")
+        more_button.setIcon(self._make_icon("more", "#475569"))
+        more_button.setIconSize(QSize(18, 18))
+        more_button.setToolTip("更多")
+
+        header_layout.addWidget(title_label)
+        header_layout.addStretch(1)
+        header_layout.addWidget(expand_button)
+        header_layout.addWidget(more_button)
+
+        reader = QTextBrowser()
+        reader.setObjectName("DocumentReader")
+        reader.setOpenExternalLinks(False)
+        reader.setOpenLinks(False)
+        reader.anchorClicked.connect(self.on_preview_link_clicked)
+
+        pane_layout.addWidget(header)
+        pane_layout.addWidget(reader, 1)
+        return pane, title_label, reader
+
+    def _build_dual_detail_page(self) -> QFrame:
+        page = QFrame()
+        page.setObjectName("DualDetailPage")
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(18, 16, 18, 14)
+        page_layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        self.dual_detail_icon = QLabel()
+        self.dual_detail_icon.setObjectName("PaperIcon")
+        self.dual_detail_icon.setPixmap(self._make_icon("file", "#2563EB").pixmap(QSize(24, 24)))
+        self.dual_detail_icon.setFixedSize(32, 32)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(5)
+        self.dual_detail_title = QLabel("等待论文")
+        self.dual_detail_title.setObjectName("PaperTitle")
+        self.dual_detail_meta = QLabel("请先选择论文")
+        self.dual_detail_meta.setObjectName("HelperText")
+        self.dual_detail_meta.setWordWrap(True)
+        title_box.addWidget(self.dual_detail_title)
+        title_box.addWidget(self.dual_detail_meta)
+
+        self.dual_detail_status = QLabel("未选择")
+        self.dual_detail_status.setObjectName("StatusBadge")
+        self.dual_detail_more = QPushButton()
+        self.dual_detail_more.setObjectName("IconButton")
+        self.dual_detail_more.setIcon(self._make_icon("more", "#475569"))
+        self.dual_detail_more.setIconSize(QSize(18, 18))
+        self.dual_detail_more.setToolTip("更多")
+        self.dual_close_button = QPushButton("关闭详情页")
+        self.dual_close_button.setObjectName("GhostButton")
+        self.dual_close_button.clicked.connect(self.exit_detail_mode)
+
+        header.addWidget(self.dual_detail_icon)
+        header.addLayout(title_box, 1)
+        header.addWidget(self.dual_detail_status)
+        header.addWidget(self.dual_detail_more)
+        header.addWidget(self.dual_close_button)
+
+        self.dual_reader_splitter = QSplitter(Qt.Horizontal)
+        self.dual_reader_splitter.setObjectName("DualReaderSplitter")
+        self.dual_reader_splitter.setChildrenCollapsible(False)
+        left_pane, self.dual_left_title, self.dual_left_reader = self._make_document_pane("原论文.pdf")
+        right_pane, self.dual_right_title, self.dual_right_reader = self._make_document_pane("中文译文.md")
+        self.dual_reader_splitter.addWidget(left_pane)
+        self.dual_reader_splitter.addWidget(right_pane)
+        self.dual_reader_splitter.setStretchFactor(0, 1)
+        self.dual_reader_splitter.setStretchFactor(1, 1)
+        self.dual_reader_splitter.setSizes([640, 640])
+
+        page_layout.addLayout(header)
+        page_layout.addWidget(self.dual_reader_splitter, 1)
+        return page
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -775,6 +880,37 @@ class MainWindow(QMainWindow):
                 max-height: 58px;
                 background: #FFFFFF;
                 border-bottom: 1px solid #E2E8F0;
+            }
+            QFrame#DualDetailPage {
+                background: #FFFFFF;
+                border: none;
+                border-radius: 0px;
+            }
+            QFrame#DocumentPane {
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 10px;
+            }
+            QFrame#DocumentPaneHeader {
+                min-height: 44px;
+                max-height: 44px;
+                background: #FFFFFF;
+                border-bottom: 1px solid #E2E8F0;
+            }
+            QLabel#DocumentPaneTab {
+                min-height: 44px;
+                color: #2563EB;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 0px 10px;
+                border-bottom: 3px solid #2563EB;
+            }
+            QTextBrowser#DocumentReader {
+                padding: 22px;
+                background: #FFFFFF;
+                border: none;
+                border-radius: 0px;
+                selection-background-color: #BFDBFE;
             }
             QLabel#AppTitle {
                 font-size: 17px;
@@ -1129,6 +1265,19 @@ class MainWindow(QMainWindow):
             QPushButton#IconButton:hover {
                 background: #F1F5F9;
             }
+            QPushButton#PaneIconButton {
+                min-width: 30px;
+                max-width: 30px;
+                min-height: 30px;
+                max-height: 30px;
+                padding: 0px;
+                border-radius: 6px;
+                border: 1px solid #E2E8F0;
+                background: #FFFFFF;
+            }
+            QPushButton#PaneIconButton:hover {
+                background: #F1F5F9;
+            }
             QLabel#DialogTitle {
                 color: #111827;
                 font-size: 20px;
@@ -1203,10 +1352,18 @@ class MainWindow(QMainWindow):
 
     def _set_preview_html(self, body: str, base_path: Path | None = None) -> None:
         """Render a small HTML view inside the main reading panel."""
+        self._set_browser_html(self.detail, body, base_path)
+
+    def _set_browser_html(
+        self,
+        browser: QTextBrowser,
+        body: str,
+        base_path: Path | None = None,
+    ) -> None:
         base_path = base_path or self.library.root
-        self.detail.setSearchPaths([str(base_path)])
-        self.detail.document().setBaseUrl(QUrl.fromLocalFile(str(base_path) + os.sep))
-        self.detail.setHtml(
+        browser.setSearchPaths([str(base_path)])
+        browser.document().setBaseUrl(QUrl.fromLocalFile(str(base_path) + os.sep))
+        browser.setHtml(
             """
             <style>
                 body {
@@ -1296,7 +1453,10 @@ class MainWindow(QMainWindow):
         for title in getattr(self, "workflow_title_labels", []):
             title.setWordWrap(sidebar_open)
 
-        self.workspace_splitter.setSizes([820, 520] if sidebar_open else [790, 570])
+        if self.detail_mode:
+            self.workspace_splitter.setSizes([0, 1200])
+        else:
+            self.workspace_splitter.setSizes([820, 520] if sidebar_open else [790, 570])
 
     def _sync_preview_tabs(self) -> None:
         buttons = {
@@ -1310,7 +1470,10 @@ class MainWindow(QMainWindow):
     def set_preview_tab(self, tab: str) -> None:
         self.current_preview_tab = tab
         self._sync_preview_tabs()
-        self._show_current_preview()
+        if self.detail_mode:
+            self._render_dual_detail()
+        else:
+            self._show_current_preview()
 
     def _show_current_preview(self) -> None:
         paper = self.current_paper
@@ -1343,14 +1506,22 @@ class MainWindow(QMainWindow):
     def enter_detail_mode(self) -> None:
         self.detail_mode = True
         self.work_panel.hide()
-        self.detail_button.hide()
-        self.close_detail_button.show()
+        self.preview_header.hide()
+        self.detail.hide()
+        self.close_detail_button.hide()
+        self.dual_detail_page.show()
+        self._render_dual_detail()
+        self._apply_sidebar_width_mode()
 
     def exit_detail_mode(self) -> None:
         self.detail_mode = False
         self.work_panel.show()
+        self.preview_header.show()
+        self.detail.show()
+        self.dual_detail_page.hide()
         self.detail_button.show()
         self.close_detail_button.hide()
+        self._apply_sidebar_width_mode()
 
     def _append_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -1422,6 +1593,9 @@ class MainWindow(QMainWindow):
             )
 
     def _preview_markdown(self, path: Path) -> None:
+        self._preview_markdown_in_browser(path, self.detail)
+
+    def _preview_markdown_in_browser(self, path: Path, browser: QTextBrowser) -> None:
         try:
             markdown = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
@@ -1429,9 +1603,9 @@ class MainWindow(QMainWindow):
 
         # Keep relative equation images such as assets/equation_1.png readable
         # inside the embedded Markdown preview.
-        self.detail.setSearchPaths([str(path.parent), str(path.parent / "assets")])
-        self.detail.document().setBaseUrl(QUrl.fromLocalFile(str(path.parent) + os.sep))
-        self.detail.document().setDefaultStyleSheet(
+        browser.setSearchPaths([str(path.parent), str(path.parent / "assets")])
+        browser.document().setBaseUrl(QUrl.fromLocalFile(str(path.parent) + os.sep))
+        browser.document().setDefaultStyleSheet(
             """
             body {
                 font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
@@ -1471,14 +1645,18 @@ class MainWindow(QMainWindow):
             }
             """
         )
-        self.detail.setMarkdown(markdown)
+        browser.setMarkdown(markdown)
         self.statusBar().showMessage(f"正在预览 Markdown：{path.name}")
 
     def _preview_pdf(self, path: Path) -> None:
+        self._preview_pdf_in_browser(path, self.detail)
+
+    def _preview_pdf_in_browser(self, path: Path, browser: QTextBrowser) -> None:
         try:
             import fitz
         except ImportError as exc:
-            self._set_preview_html(
+            self._set_browser_html(
+                browser,
                 "<h2>PDF 预览不可用</h2>"
                 f"<p class='muted'>缺少 PyMuPDF：{html.escape(str(exc))}</p>",
                 path.parent,
@@ -1494,7 +1672,7 @@ class MainWindow(QMainWindow):
             total = len(doc)
             for index, page in enumerate(doc, start=1):
                 image_path = cache_dir / f"page_{index:03d}.png"
-                display_width = max(360, min(900, self.detail.viewport().width() - 70))
+                display_width = max(360, min(900, browser.viewport().width() - 70))
                 if not image_path.exists() or image_path.stat().st_mtime < pdf_mtime:
                     scale = max(0.7, display_width / max(float(page.rect.width), 1.0))
                     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
@@ -1511,13 +1689,111 @@ class MainWindow(QMainWindow):
         finally:
             doc.close()
 
-        self._set_preview_html(
+        self._set_browser_html(
+            browser,
             f"<h2>{html.escape(path.name)}</h2>"
             "<p class='muted'>PDF 已在程序内渲染为页面预览。</p>"
             + "".join(pages),
             cache_dir,
         )
         self.statusBar().showMessage(f"正在预览 PDF：{path.name}")
+
+    def _preview_path_in_browser(self, path: Path | None, browser: QTextBrowser, empty_title: str) -> None:
+        if path is None or not path.exists():
+            self._set_browser_html(
+                browser,
+                f"<h2>{html.escape(empty_title)}</h2>"
+                "<p class='muted'>当前论文还没有这个文件。</p>",
+                self.library.root,
+            )
+            return
+        suffix = path.suffix.lower()
+        if suffix == ".md":
+            self._preview_markdown_in_browser(path, browser)
+        elif suffix == ".pdf":
+            self._preview_pdf_in_browser(path, browser)
+        else:
+            self._set_browser_html(
+                browser,
+                f"<h2>{html.escape(path.name)}</h2>"
+                "<p class='muted'>这个文件类型暂不支持内置预览。</p>"
+                f"<p class='path'>{html.escape(str(path))}</p>",
+                path.parent if path.parent.exists() else self.library.root,
+            )
+
+    def _current_selected_file_path(self) -> Path | None:
+        if self.selected_tree_item is None:
+            return None
+        data = self.selected_tree_item.data(0, Qt.UserRole) or {}
+        if data.get("kind") != "file":
+            return None
+        path = Path(data.get("path", ""))
+        return path if path.exists() else None
+
+    def _detail_file_label(self, path: Path | None, fallback: str) -> str:
+        if path is None:
+            return fallback
+        if path.suffix.lower() == ".pdf":
+            return "原论文.pdf"
+        if path.name == "translated.md":
+            return "中文译文.md"
+        if path.name == "summary.md":
+            return "Summary.md"
+        return path.name
+
+    def _resolve_dual_detail_paths(self) -> tuple[Path | None, Path | None]:
+        paper = self.current_paper
+        left_path = self.current_pdf if self.current_pdf and self.current_pdf.exists() else None
+        right_path: Path | None = None
+        if paper:
+            left_path = paper.original_pdf if paper.original_pdf and paper.original_pdf.exists() else left_path
+            if self.current_preview_tab == "summary":
+                right_path = paper.summary_md if paper.summary_md and paper.summary_md.exists() else None
+            else:
+                right_path = paper.translated_md if paper.translated_md and paper.translated_md.exists() else None
+            if right_path is None and paper.summary_md and paper.summary_md.exists():
+                right_path = paper.summary_md
+            if right_path is None and paper.translated_md and paper.translated_md.exists():
+                right_path = paper.translated_md
+
+        selected_path = self._current_selected_file_path()
+        if selected_path:
+            if selected_path.suffix.lower() == ".pdf":
+                left_path = selected_path
+            elif selected_path.suffix.lower() == ".md":
+                right_path = selected_path
+        return left_path, right_path
+
+    def _render_dual_detail(self) -> None:
+        paper = self.current_paper
+        selected_path = self._current_selected_file_path()
+        if paper is None and selected_path and selected_path.parent.exists():
+            title = selected_path.parent.name
+            meta = f"位置：{selected_path.parent}"
+        elif paper:
+            title = paper.name
+            try:
+                created_at = datetime.fromtimestamp(paper.path.stat().st_ctime).strftime("%Y-%m-%d %H:%M")
+            except OSError:
+                created_at = "-"
+            meta = f"位置：{paper.path}    |    创建时间：{created_at}"
+        elif self.current_folder:
+            title = self.current_folder.name
+            meta = f"位置：{self.current_folder.path}"
+        else:
+            title = "等待论文"
+            meta = "请先在左侧选择论文，或上传新的 PDF。"
+
+        self.dual_detail_title.setText(title)
+        self.dual_detail_meta.setText(meta)
+        self._set_badge(self.dual_detail_status, "项目健康" if paper else "未选择")
+
+        left_path, right_path = self._resolve_dual_detail_paths()
+        self.dual_left_title.setText(self._detail_file_label(left_path, "原论文.pdf"))
+        self.dual_right_title.setText(self._detail_file_label(right_path, "中文译文.md"))
+        self._preview_path_in_browser(left_path, self.dual_left_reader, "原论文 PDF")
+        self._preview_path_in_browser(right_path, self.dual_right_reader, "中文译文 Markdown")
+        self.dual_reader_splitter.setSizes([640, 640])
 
     def refresh_folders(self, preferred_path: Path | None = None) -> None:
         self.library_tree.clear()
@@ -1768,6 +2044,8 @@ class MainWindow(QMainWindow):
                 self.current_preview_tab = "summary"
             self._sync_preview_tabs()
             self._show_current_preview()
+        if self.detail_mode:
+            self._render_dual_detail()
 
     def on_tree_item_double_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         data = item.data(0, Qt.UserRole) or {}
