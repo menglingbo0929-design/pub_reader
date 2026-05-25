@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStatusBar,
@@ -507,7 +508,8 @@ class MainWindow(QMainWindow):
 
         self.work_panel = QFrame()
         self.work_panel.setObjectName("WorkPanel")
-        self.work_panel.setMinimumWidth(640)
+        self.work_panel.setMinimumWidth(560)
+        self.work_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         work_layout = QVBoxLayout(self.work_panel)
         work_layout.setContentsMargins(22, 20, 22, 20)
         work_layout.setSpacing(16)
@@ -606,6 +608,7 @@ class MainWindow(QMainWindow):
 
         progress_card = QFrame()
         progress_card.setObjectName("ProgressCard")
+        progress_card.setMinimumHeight(152)
         progress_layout = QVBoxLayout(progress_card)
         progress_layout.setContentsMargins(18, 16, 18, 16)
         progress_layout.setSpacing(12)
@@ -642,6 +645,7 @@ class MainWindow(QMainWindow):
 
         log_card = QFrame()
         log_card.setObjectName("LogCard")
+        log_card.setMinimumHeight(172)
         log_layout = QVBoxLayout(log_card)
         log_layout.setContentsMargins(18, 16, 18, 16)
         log_layout.setSpacing(10)
@@ -666,9 +670,16 @@ class MainWindow(QMainWindow):
         work_layout.addWidget(progress_card)
         work_layout.addWidget(log_card, 1)
 
+        self.work_scroll = QScrollArea()
+        self.work_scroll.setObjectName("WorkScroll")
+        self.work_scroll.setWidgetResizable(True)
+        self.work_scroll.setFrameShape(QFrame.NoFrame)
+        self.work_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.work_scroll.setWidget(self.work_panel)
+
         self.preview_panel = QFrame()
         self.preview_panel.setObjectName("PreviewCard")
-        self.preview_panel.setMinimumWidth(500)
+        self.preview_panel.setMinimumWidth(420)
         preview_layout = QVBoxLayout(self.preview_panel)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
@@ -748,7 +759,7 @@ class MainWindow(QMainWindow):
         self.dual_detail_page.hide()
         preview_layout.addWidget(self.dual_detail_page, 1)
 
-        self.workspace_splitter.addWidget(self.work_panel)
+        self.workspace_splitter.addWidget(self.work_scroll)
         self.workspace_splitter.addWidget(self.preview_panel)
         self.workspace_splitter.setStretchFactor(0, 6)
         self.workspace_splitter.setStretchFactor(1, 5)
@@ -988,6 +999,10 @@ class MainWindow(QMainWindow):
                 background: #FFFFFF;
                 border: 1px solid #E2E8F0;
                 border-radius: 12px;
+            }
+            QScrollArea#WorkScroll {
+                background: transparent;
+                border: none;
             }
             QFrame#UploadBox {
                 background: #FFFFFF;
@@ -1611,9 +1626,13 @@ class MainWindow(QMainWindow):
             title.setWordWrap(sidebar_open)
 
         if self.detail_mode:
-            self.workspace_splitter.setSizes([0, 1200])
+            total = max(self.workspace_splitter.width(), sum(self.workspace_splitter.sizes()), 1200)
+            self.workspace_splitter.setSizes([0, total])
         else:
-            self.workspace_splitter.setSizes([820, 520] if sidebar_open else [790, 570])
+            total = max(self.workspace_splitter.width(), sum(self.workspace_splitter.sizes()), 1000)
+            preview_width = max(420, int(total * (0.40 if sidebar_open else 0.42)))
+            work_width = max(560, total - preview_width)
+            self.workspace_splitter.setSizes([work_width, preview_width])
 
     def _sync_preview_tabs(self) -> None:
         buttons = {
@@ -1709,7 +1728,7 @@ class MainWindow(QMainWindow):
     def enter_detail_mode(self) -> None:
         self.detail_mode = True
         self.detail_view_mode = "single"
-        self.work_panel.hide()
+        self.work_scroll.hide()
         self.preview_header.show()
         self.single_preview_frame.show()
         self.dual_detail_page.hide()
@@ -1732,7 +1751,7 @@ class MainWindow(QMainWindow):
             anchor_path = self._current_selected_file_path()
         self.dual_anchor_path = anchor_path if anchor_path and anchor_path.exists() else None
         self.dual_picker_path = None
-        self.work_panel.hide()
+        self.work_scroll.hide()
         self.preview_header.hide()
         self.single_preview_frame.hide()
         self.dual_detail_page.show()
@@ -1742,7 +1761,7 @@ class MainWindow(QMainWindow):
     def exit_detail_mode(self) -> None:
         self.detail_mode = False
         self.detail_view_mode = "single"
-        self.work_panel.show()
+        self.work_scroll.show()
         self.preview_header.show()
         self.single_preview_frame.show()
         self.dual_detail_page.hide()
@@ -2037,7 +2056,7 @@ class MainWindow(QMainWindow):
         self._sync_preview_tabs()
         self.detail_mode = True
         self.detail_view_mode = "single"
-        self.work_panel.hide()
+        self.work_scroll.hide()
         self.dual_detail_page.hide()
         self.preview_header.show()
         self.single_preview_frame.show()
@@ -2097,10 +2116,6 @@ class MainWindow(QMainWindow):
                 if file_preferred is not None:
                     preferred_item = file_preferred
 
-        recycle_item = QTreeWidgetItem(["回收站"])
-        recycle_item.setIcon(0, self._make_icon("trash", "#64748B"))
-        recycle_item.setData(0, Qt.UserRole, {"kind": "recycle", "path": self.library.root})
-        self.library_tree.addTopLevelItem(recycle_item)
         if preferred_item is not None:
             self.library_tree.setCurrentItem(preferred_item)
             preferred_item.setExpanded(True)
@@ -2331,13 +2346,6 @@ class MainWindow(QMainWindow):
                 "<h2>资源库</h2>"
                 "<p class='muted'>选择一个文件夹或论文项目后，右侧会显示原论文、译文或 Summary 预览。</p>"
                 f"<p class='path'>路径：{html.escape(str(self.library.root))}</p>",
-                self.library.root,
-            )
-        elif kind == "recycle":
-            self.current_preview_path = None
-            self._set_preview_html(
-                "<h2>回收站</h2>"
-                "<p class='muted'>删除操作会优先移动到系统回收站。</p>",
                 self.library.root,
             )
         elif kind == "collection":
