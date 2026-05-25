@@ -292,6 +292,7 @@ class MainWindow(QMainWindow):
         self.pdf_preview_cache = Path(tempfile.mkdtemp(prefix="pub_reader_pdf_preview_"))
         self.log_entries: list[tuple[str, str]] = []
         self.last_progress_message = ""
+        self._drag_overlay_visible = False
 
         self.setWindowTitle("Pub Reader")
         self.setMinimumSize(1120, 720)
@@ -316,6 +317,7 @@ class MainWindow(QMainWindow):
         icons = {
             "file": f'<path {common} d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path {common} d="M14 2v6h6"/><path {common} d="M16 13H8"/><path {common} d="M16 17H8"/><path {common} d="M10 9H8"/>',
             "upload": f'<path {common} d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path {common} d="M17 8 12 3 7 8"/><path {common} d="M12 3v12"/>',
+            "drop_box": f'<path {common} d="M4 10.5V19a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8.5"/><path {common} d="M7 10l5-5 5 5"/><path {common} d="M12 5v11"/><path {common} d="M6 10h3"/><path {common} d="M15 10h3"/>',
             "edit": f'<path {common} d="M12 20h9"/><path {common} d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
             "trash": f'<path {common} d="M3 6h18"/><path {common} d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path {common} d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path {common} d="M10 11v6"/><path {common} d="M14 11v6"/>',
             "menu": f'<path {common} d="M4 6h16"/><path {common} d="M4 12h16"/><path {common} d="M4 18h16"/>',
@@ -508,7 +510,7 @@ class MainWindow(QMainWindow):
 
         self.work_panel = QFrame()
         self.work_panel.setObjectName("WorkPanel")
-        self.work_panel.setMinimumWidth(560)
+        self.work_panel.setMinimumWidth(0)
         self.work_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         work_layout = QVBoxLayout(self.work_panel)
         work_layout.setContentsMargins(22, 20, 22, 20)
@@ -679,7 +681,7 @@ class MainWindow(QMainWindow):
 
         self.preview_panel = QFrame()
         self.preview_panel.setObjectName("PreviewCard")
-        self.preview_panel.setMinimumWidth(420)
+        self.preview_panel.setMinimumWidth(320)
         preview_layout = QVBoxLayout(self.preview_panel)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
@@ -771,11 +773,49 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([318, 1260])
 
+        self._build_drag_overlay(root)
         self.setStatusBar(QStatusBar())
         self.statusBar().hide()
         self._apply_sidebar_width_mode()
         self._sync_preview_tabs()
         self._append_log("等待选择论文或上传 PDF。")
+
+    def _build_drag_overlay(self, parent: QWidget) -> None:
+        self.drag_overlay = QFrame(parent)
+        self.drag_overlay.setObjectName("DragOverlay")
+        self.drag_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        overlay_layout = QVBoxLayout(self.drag_overlay)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.addStretch(1)
+
+        card = QFrame()
+        card.setObjectName("DragOverlayCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(34, 32, 34, 32)
+        card_layout.setSpacing(14)
+        icon = QLabel()
+        icon.setObjectName("DragOverlayIcon")
+        icon.setPixmap(self._make_icon("drop_box", "#2563EB").pixmap(QSize(72, 72)))
+        icon.setAlignment(Qt.AlignCenter)
+        title = QLabel("拖拽论文文件到此处")
+        title.setObjectName("DragOverlayTitle")
+        title.setAlignment(Qt.AlignCenter)
+        helper = QLabel("松开鼠标即可上传到当前文件夹，并加入论文处理流程")
+        helper.setObjectName("DragOverlayHelper")
+        helper.setAlignment(Qt.AlignCenter)
+        helper.setWordWrap(True)
+        card_layout.addWidget(icon)
+        card_layout.addWidget(title)
+        card_layout.addWidget(helper)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(card)
+        row.addStretch(1)
+        overlay_layout.addLayout(row)
+        overlay_layout.addStretch(1)
+        self.drag_overlay.hide()
+        self._position_drag_overlay()
 
     def _make_arrow_label(self) -> QLabel:
         arrow = QLabel()
@@ -972,6 +1012,26 @@ class MainWindow(QMainWindow):
             }
             QFrame#Body {
                 background: #F7F9FC;
+            }
+            QFrame#DragOverlay {
+                background: rgba(247, 249, 252, 210);
+                border: none;
+            }
+            QFrame#DragOverlayCard {
+                min-width: 360px;
+                max-width: 460px;
+                background: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 28px;
+            }
+            QLabel#DragOverlayTitle {
+                color: #111827;
+                font-size: 22px;
+                font-weight: 800;
+            }
+            QLabel#DragOverlayHelper {
+                color: #334155;
+                font-size: 14px;
             }
             QLabel#AppIcon {
                 min-width: 28px;
@@ -1555,6 +1615,35 @@ class MainWindow(QMainWindow):
                     background: #F8FAFC;
                 }
                 .path { color: #64748B; font-size: 13px; }
+                .small { font-size: 12px; }
+                .dual-drop-card {
+                    margin: 46px auto;
+                    max-width: 520px;
+                    padding: 38px 34px;
+                    text-align: center;
+                    border: 1px dashed #CBD5E1;
+                    border-radius: 22px;
+                    background: #F8FAFC;
+                }
+                .dual-drop-icon {
+                    width: 68px;
+                    height: 68px;
+                    margin: 0 auto 14px auto;
+                    border-radius: 20px;
+                    color: #FFFFFF;
+                    background: #2563EB;
+                    font-size: 38px;
+                    line-height: 68px;
+                    font-weight: 800;
+                }
+                .open-button {
+                    display: inline-block;
+                    margin-top: 8px;
+                    padding: 11px 22px;
+                    color: #FFFFFF;
+                    background: #2563EB;
+                    border-radius: 10px;
+                }
                 .pdf-page {
                     margin: 18px 0 28px 0;
                     padding: 14px;
@@ -1602,6 +1691,31 @@ class MainWindow(QMainWindow):
         self.preview_header_layout.removeWidget(self.sidebar_toggle_button)
         self.sidebar_rail_layout.removeWidget(self.sidebar_toggle_button)
 
+    def _position_drag_overlay(self) -> None:
+        overlay = getattr(self, "drag_overlay", None)
+        if overlay is None or self.centralWidget() is None:
+            return
+        overlay.setGeometry(self.centralWidget().rect())
+        overlay.raise_()
+
+    def _show_drag_overlay(self) -> None:
+        if self.detail_mode:
+            return
+        self._drag_overlay_visible = True
+        self._position_drag_overlay()
+        self.drag_overlay.show()
+        self.drag_overlay.raise_()
+
+    def _hide_drag_overlay(self) -> None:
+        self._drag_overlay_visible = False
+        if hasattr(self, "drag_overlay"):
+            self.drag_overlay.hide()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._position_drag_overlay()
+        self._apply_sidebar_width_mode()
+
     def _apply_sidebar_width_mode(self) -> None:
         """Use a compact layout only while the full project sidebar is visible."""
         sidebar_open = self.sidebar_visible
@@ -1609,8 +1723,10 @@ class MainWindow(QMainWindow):
         header_margins = (12, 14, 12, 10) if sidebar_open else (18, 14, 18, 10)
         header_spacing = 4 if sidebar_open else 8
         detail_size = 34 if sidebar_open else 38
-        card_min_width = 0 if sidebar_open else 200
-        card_min_height = 150 if sidebar_open else 128
+        available_work_width = self.work_scroll.viewport().width() if hasattr(self, "work_scroll") else 900
+        compact_work = available_work_width < 760
+        card_min_width = 0
+        card_min_height = 170 if compact_work else 132
 
         self.preview_header_layout.setContentsMargins(*header_margins)
         self.preview_header_layout.setSpacing(header_spacing)
@@ -1630,8 +1746,9 @@ class MainWindow(QMainWindow):
             self.workspace_splitter.setSizes([0, total])
         else:
             total = max(self.workspace_splitter.width(), sum(self.workspace_splitter.sizes()), 1000)
-            preview_width = max(420, int(total * (0.40 if sidebar_open else 0.42)))
-            work_width = max(560, total - preview_width)
+            preview_ratio = 0.32 if sidebar_open else 0.38
+            preview_width = max(320, int(total * preview_ratio))
+            work_width = max(0, total - preview_width)
             self.workspace_splitter.setSizes([work_width, preview_width])
 
     def _sync_preview_tabs(self) -> None:
@@ -1669,21 +1786,56 @@ class MainWindow(QMainWindow):
                     return path
         return None
 
+    def _document_path_from_mime(self, mime_data) -> Path | None:
+        if mime_data.hasUrls():
+            for url in mime_data.urls():
+                if not url.isLocalFile():
+                    continue
+                path = Path(url.toLocalFile())
+                if path.is_file() and path.suffix.lower() in {".pdf", ".md"}:
+                    return path
+        if mime_data.hasText():
+            for raw in re.split(r"[\r\n]+", mime_data.text()):
+                candidate = raw.strip().strip('"')
+                if not candidate:
+                    continue
+                url = QUrl(candidate)
+                path = Path(url.toLocalFile()) if url.isLocalFile() else Path(candidate)
+                if path.is_file() and path.suffix.lower() in {".pdf", ".md"}:
+                    return path
+        return None
+
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.DragLeave and self._event_belongs_to_window(obj):
+            self._hide_drag_overlay()
+            return super().eventFilter(obj, event)
         if event.type() not in {QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop}:
             return super().eventFilter(obj, event)
         if not self._event_belongs_to_window(obj):
             return super().eventFilter(obj, event)
 
+        if self.detail_mode and self.detail_view_mode == "dual":
+            doc_path = self._document_path_from_mime(event.mimeData())  # type: ignore[attr-defined]
+            if doc_path is None:
+                return super().eventFilter(obj, event)
+            event.acceptProposedAction()  # type: ignore[attr-defined]
+            if event.type() == QEvent.Type.Drop:
+                self.dual_picker_path = doc_path
+                self._render_dual_detail()
+            return True
+
         pdf_path = self._pdf_path_from_mime(event.mimeData())  # type: ignore[attr-defined]
         if pdf_path is None:
+            self._hide_drag_overlay()
             return super().eventFilter(obj, event)
         if self.detail_mode:
             event.ignore()  # type: ignore[attr-defined]
             return True
 
+        self._show_drag_overlay()
         event.acceptProposedAction()  # type: ignore[attr-defined]
         if event.type() == QEvent.Type.Drop:
+            self._hide_drag_overlay()
             self.import_pdf(pdf_path)
         return True
 
@@ -1816,8 +1968,28 @@ class MainWindow(QMainWindow):
         label.update()
 
     def on_preview_link_clicked(self, url: QUrl) -> None:
+        if url.scheme() == "pubreader" and url.host() == "choose-dual-file":
+            self.choose_dual_file()
+            return
         if url.isLocalFile():
             self.preview_path(Path(url.toLocalFile()))
+
+    def choose_dual_file(self) -> None:
+        start_dir = self.current_paper.path if self.current_paper else self.library.root
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择用于双栏阅读的文件",
+            str(start_dir),
+            "Readable Files (*.pdf *.md);;PDF Files (*.pdf);;Markdown Files (*.md)",
+        )
+        if not path:
+            return
+        selected = Path(path)
+        if selected.suffix.lower() not in {".pdf", ".md"}:
+            QMessageBox.warning(self, "文件类型不支持", "请选择 PDF 或 Markdown 文件。")
+            return
+        self.dual_picker_path = selected
+        self._render_dual_detail()
 
     def preview_path(self, path: Path) -> None:
         if not path.exists():
@@ -1843,6 +2015,108 @@ class MainWindow(QMainWindow):
 
     def _preview_markdown(self, path: Path) -> None:
         self._preview_markdown_in_browser(path, self.detail)
+
+    def _preview_markdown_to_html(self, markdown: str) -> str:
+        """Render generated Markdown into HTML while preserving raw table blocks."""
+        def inline(text: str) -> str:
+            escaped = html.escape(text)
+            escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+            return re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+
+        def render_pipe_table(lines: list[str]) -> str:
+            rows = [[cell.strip() for cell in line.strip().strip("|").split("|")] for line in lines]
+            if len(rows) < 2:
+                return "<p>" + "<br>".join(inline(line) for line in lines) + "</p>"
+            header = rows[0]
+            has_separator = re.fullmatch(
+                r"\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*",
+                lines[1],
+            )
+            body_rows = rows[2:] if has_separator else rows[1:]
+            head_html = "".join(f"<th>{inline(cell)}</th>" for cell in header)
+            body_html = "\n".join(
+                "<tr>" + "".join(f"<td>{inline(cell)}</td>" for cell in row) + "</tr>"
+                for row in body_rows
+            )
+            return f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
+
+        html_parts: list[str] = []
+        paragraph: list[str] = []
+        lines = markdown.splitlines()
+        index = 0
+
+        def flush_paragraph() -> None:
+            if paragraph:
+                html_parts.append("<p>" + "<br>".join(inline(line) for line in paragraph) + "</p>")
+                paragraph.clear()
+
+        while index < len(lines):
+            stripped = lines[index].strip()
+            if not stripped:
+                flush_paragraph()
+                index += 1
+                continue
+            if stripped.lower().startswith("<table"):
+                flush_paragraph()
+                raw: list[str] = []
+                while index < len(lines):
+                    raw.append(lines[index])
+                    if "</table>" in lines[index].lower():
+                        index += 1
+                        break
+                    index += 1
+                html_parts.append("\n".join(raw))
+                continue
+            if stripped.lower().startswith("<div class=\"formula-block\""):
+                flush_paragraph()
+                raw = []
+                while index < len(lines):
+                    raw.append(lines[index])
+                    if "</div>" in lines[index].lower():
+                        index += 1
+                        break
+                    index += 1
+                html_parts.append("\n".join(raw))
+                continue
+            image = re.match(r"!\[(?P<alt>[^\]]*)\]\((?P<src>[^)]+)\)", stripped)
+            if image:
+                flush_paragraph()
+                alt = html.escape(image.group("alt"))
+                src = html.escape(image.group("src"))
+                html_parts.append(f"<figure><img src=\"{src}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>")
+                index += 1
+                continue
+            heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            if heading:
+                flush_paragraph()
+                level = len(heading.group(1))
+                html_parts.append(f"<h{level}>{inline(heading.group(2))}</h{level}>")
+                index += 1
+                continue
+            if stripped.startswith("|") and "|" in stripped[1:]:
+                flush_paragraph()
+                table_lines: list[str] = []
+                while index < len(lines) and lines[index].strip().startswith("|"):
+                    table_lines.append(lines[index])
+                    index += 1
+                html_parts.append(render_pipe_table(table_lines))
+                continue
+            bullet = re.match(r"^[-*]\s+(.+)$", stripped)
+            if bullet:
+                flush_paragraph()
+                items: list[str] = []
+                while index < len(lines):
+                    match = re.match(r"^[-*]\s+(.+)$", lines[index].strip())
+                    if not match:
+                        break
+                    items.append(f"<li>{inline(match.group(1))}</li>")
+                    index += 1
+                html_parts.append("<ul>" + "".join(items) + "</ul>")
+                continue
+            paragraph.append(lines[index])
+            index += 1
+        flush_paragraph()
+        return "\n".join(html_parts)
 
     def _preview_markdown_in_browser(self, path: Path, browser: QTextBrowser) -> None:
         if browser is self.detail:
@@ -1871,6 +2145,25 @@ class MainWindow(QMainWindow):
             p, li {
                 color: #1F2937;
             }
+            p {
+                margin: 0 0 0.8em 0;
+            }
+            li {
+                margin-bottom: 0.35em;
+            }
+            .formula-block {
+                margin: 0.9em 0;
+                padding: 12px 16px;
+                border: 1px solid #CBD5E1;
+                border-radius: 8px;
+                background: #F8FAFC;
+                text-align: center;
+            }
+            .formula-line {
+                font-family: "Cambria Math", "Times New Roman", serif;
+                font-size: 16px;
+                white-space: nowrap;
+            }
             code {
                 background: #F8FAFC;
                 border: 1px solid #E2E8F0;
@@ -1896,7 +2189,93 @@ class MainWindow(QMainWindow):
             }
             """
         )
-        browser.setMarkdown(markdown)
+        preview_html = self._preview_markdown_to_html(markdown)
+        browser.setHtml(
+            """
+            <!doctype html>
+            <html>
+              <head>
+                <meta charset="utf-8">
+                <style>
+                  body {
+                      font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+                      color: #1F2937;
+                      line-height: 1.65;
+                      background: #FFFFFF;
+                  }
+                  h1, h2, h3, h4 {
+                      color: #2563EB;
+                      font-weight: 700;
+                  }
+                  p, li {
+                      color: #1F2937;
+                  }
+                  p {
+                      margin: 0 0 0.8em 0;
+                  }
+                  li {
+                      margin-bottom: 0.35em;
+                  }
+                  .formula-block {
+                      margin: 0.9em 0;
+                      padding: 12px 16px;
+                      border: 1px solid #CBD5E1;
+                      border-radius: 8px;
+                      background: #F8FAFC;
+                      text-align: center;
+                  }
+                  .formula-line {
+                      font-family: "Cambria Math", "Times New Roman", serif;
+                      font-size: 16px;
+                      white-space: nowrap;
+                  }
+                  code {
+                      background: #F8FAFC;
+                      border: 1px solid #E2E8F0;
+                      border-radius: 6px;
+                      padding: 2px 5px;
+                  }
+                  pre {
+                      background: #F8FAFC;
+                      border: 1px solid #E2E8F0;
+                      border-radius: 8px;
+                      padding: 12px;
+                  }
+                  table {
+                      border-collapse: collapse;
+                      border: 1px solid #CBD5E1;
+                      margin: 0.9em 0;
+                      max-width: 100%;
+                  }
+                  th {
+                      background: #F8FAFC;
+                      font-weight: 700;
+                  }
+                  th, td {
+                      border: 1px solid #CBD5E1;
+                      padding: 6px 8px;
+                      vertical-align: top;
+                  }
+                  img {
+                      max-width: 100%;
+                  }
+                  figure {
+                      margin: 1em 0;
+                  }
+                  figcaption {
+                      color: #64748B;
+                      margin-top: 0.35em;
+                  }
+                </style>
+              </head>
+              <body>
+            """
+            + preview_html
+            + """
+              </body>
+            </html>
+            """
+        )
         self.statusBar().showMessage(f"正在预览 Markdown：{path.name}")
 
     def _preview_pdf(self, path: Path) -> None:
@@ -1937,8 +2316,13 @@ class MainWindow(QMainWindow):
             stack.setCurrentWidget(text_browser)
             self._set_browser_html(
                 text_browser,
+                "<div class='dual-drop-card'>"
+                "<div class='dual-drop-icon'>⇧</div>"
                 f"<h2>{html.escape(empty_title)}</h2>"
-                "<p class='muted'>请从左侧项目树中选择一个 PDF 或 Markdown 文件。</p>",
+                "<p class='muted'>拖拽 PDF 或 Markdown 到这里，或点击按钮打开文件。</p>"
+                "<p><a class='open-button' href='pubreader://choose-dual-file'>打开文件</a></p>"
+                "<p class='muted small'>支持 .pdf 与 .md；该文件只用于当前双栏阅读，不会替代原论文。</p>"
+                "</div>",
                 self.library.root,
             )
             return

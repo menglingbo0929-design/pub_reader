@@ -14,7 +14,10 @@ REFERENCE_CITATION_RE = re.compile(
     r"[\]\］]"
 )
 
-FORMULA_BLOCK_RE = re.compile(r"<pre><code class=\"language-latex\">.*?</code></pre>", re.DOTALL)
+FORMULA_BLOCK_RE = re.compile(
+    r"(?:<pre><code class=\"language-latex\">.*?</code></pre>|<div class=\"formula-block\".*?</div>)",
+    re.DOTALL,
+)
 
 
 def _block_text(block: PaperBlock, key: str) -> str:
@@ -62,6 +65,10 @@ def render_table_block_to_markdown(table_block: PaperBlock) -> str:
 
     if not columns and normalized_rows:
         columns = [f"列 {index + 1}" for index in range(max(len(row) for row in normalized_rows))]
+
+    html_content = _block_text(table_block, "html")
+    if html_content and "<table" in html_content.lower():
+        return f"{heading}\n\n{html_content.strip()}"
 
     raw_content = _block_text(table_block, "content") or _block_text(table_block, "raw_text")
     if not columns or not normalized_rows:
@@ -119,8 +126,136 @@ def render_equation_block_to_markdown(equation_block: PaperBlock) -> str:
 
 
 def _formula_area(formula: str) -> str:
-    content = html.escape(formula.strip())
-    return f"<pre><code class=\"language-latex\">{content}</code></pre>"
+    raw = _strip_math_wrapper(formula)
+    readable = _plain_display_formula(raw)
+    if not readable:
+        return "> 公式未能可靠识别，请参考原 PDF 对应位置。"
+    return (
+        f"<div class=\"formula-block\" data-latex=\"{html.escape(raw, quote=True)}\">"
+        f"<span class=\"formula-line\">{html.escape(readable)}</span>"
+        "</div>"
+    )
+
+
+def _strip_math_wrapper(formula: str) -> str:
+    text = formula.strip()
+    text = re.sub(r"^```(?:latex|tex|math)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    if text.startswith("$$") and text.endswith("$$"):
+        text = text[2:-2]
+    if text.startswith(r"\[") and text.endswith(r"\]"):
+        text = text[2:-2]
+    return text.strip()
+
+
+def _read_brace_group(text: str, start: int) -> tuple[str, int] | None:
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index], index + 1
+    return None
+
+
+def _replace_frac(text: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(text):
+        if not text.startswith(r"\frac", index):
+            result.append(text[index])
+            index += 1
+            continue
+        cursor = index + len(r"\frac")
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        numerator = _read_brace_group(text, cursor)
+        if numerator is None:
+            result.append(r"\frac")
+            index = cursor
+            continue
+        cursor = numerator[1]
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        denominator = _read_brace_group(text, cursor)
+        if denominator is None:
+            result.append(r"\frac")
+            index = cursor
+            continue
+        num = _plain_display_formula(numerator[0])
+        den = _plain_display_formula(denominator[0])
+        result.append(f"({num})/({den})")
+        index = denominator[1]
+    return "".join(result)
+
+
+def _replace_group_commands(text: str) -> str:
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"\\(?:text|mathrm|operatorname|mathbb|mathcal|mathbf|boldsymbol)\{([^{}]+)\}", r"\1", text)
+    return text
+
+
+def _plain_display_formula(formula: str) -> str:
+    text = _strip_math_wrapper(formula)
+    text = text.replace("\n", " ")
+    text = re.sub(r"\\tag\{([^{}]+)\}", r"  (\1)", text)
+    text = re.sub(r"\\(?:left|right|big|Big|bigg|Bigg)", "", text)
+    text = _replace_frac(text)
+    text = _replace_group_commands(text)
+    replacements = {
+        r"\cdot": "·",
+        r"\times": "×",
+        r"\leq": "≤",
+        r"\le": "≤",
+        r"\geq": "≥",
+        r"\ge": "≥",
+        r"\neq": "≠",
+        r"\approx": "≈",
+        r"\sim": "∼",
+        r"\mid": "|",
+        r"\|": "‖",
+        r"\log": "log",
+        r"\exp": "exp",
+        r"\min": "min",
+        r"\max": "max",
+        r"\arg": "arg",
+        r"\sum": "Σ",
+        r"\prod": "Π",
+        r"\mathbb{E}": "E",
+        r"\pi": "π",
+        r"\tau": "τ",
+        r"\theta": "θ",
+        r"\lambda": "λ",
+        r"\alpha": "α",
+        r"\beta": "β",
+        r"\gamma": "γ",
+        r"\delta": "δ",
+        r"\sigma": "σ",
+        r"\phi": "φ",
+        r"\rho": "ρ",
+        r"\epsilon": "ε",
+        r"\Delta": "Δ",
+        r"\top": "ᵀ",
+        r"\infty": "∞",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    text = re.sub(r"_\{([^{}]+)\}", r"₍\1₎", text)
+    text = re.sub(r"\^\{([^{}]+)\}", r"^(\1)", text)
+    text = re.sub(r"_([A-Za-z0-9]+)", r"₍\1₎", text)
+    text = re.sub(r"\^([A-Za-z0-9+\-*]+)", r"^(\1)", text)
+    text = text.replace(r"\_", "_")
+    text = re.sub(r"\\([A-Za-z]+)", r"\1", text)
+    text = text.replace("{", "").replace("}", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _strip_code_fence(markdown: str) -> str:
@@ -142,12 +277,9 @@ def _strip_preface(markdown: str) -> str:
 
 
 def _remove_references_section(markdown: str) -> str:
-    return re.sub(
-        r"(?im)^#{1,4}\s*(References|Bibliography|参考文献)\s*$.*\Z",
-        "",
-        markdown,
-        flags=re.DOTALL,
-    ).strip()
+    # References may appear before appendices in many papers.  Do not strip the
+    # rest of the document here, otherwise Appendix material is lost with it.
+    return markdown.strip()
 
 
 def _strip_reference_citations(markdown: str) -> str:
@@ -224,9 +356,18 @@ def _replace_equation_image_links(markdown: str, paper_blocks: Sequence[PaperBlo
         number_match = re.search(r"(\d+(?:_\d+)*)", alt) or re.search(r"equation[_-](\d+(?:_\d+)*)", path)
         key = number_match.group(1).replace("_", "-") if number_match else ""
         block = by_number.get(key) or by_path.get(path)
-        return render_equation_block_to_markdown(block) if block else match.group(0)
+        return render_equation_block_to_markdown(block) if block else "> 公式未能可靠识别，请参考原 PDF 对应位置。"
 
     return re.sub(r"!\[([^\]]*)\]\(([^)]*equation[^)]*)\)", repl, markdown, flags=re.IGNORECASE)
+
+
+def _remove_remaining_equation_images(markdown: str) -> str:
+    return re.sub(
+        r"!\[[^\]]*(?:公式|equation)[^\]]*\]\([^)]*equation[^)]*\)",
+        "> 公式未能可靠识别，请参考原 PDF 对应位置。",
+        markdown,
+        flags=re.IGNORECASE,
+    )
 
 
 def _convert_display_math_to_formula_areas(markdown: str) -> str:
@@ -254,6 +395,8 @@ def _normalize_spacing(markdown: str) -> str:
     text = markdown.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"\n*(^#{1,6}\s+)", r"\n\n\1", text, flags=re.MULTILINE)
+    text = re.sub(r"\n*(<div class=\"formula-block\"[^>]*>)", r"\n\n\1", text)
+    text = re.sub(r"(</div>)\n*(?!\n|$)", r"\1\n\n", text)
     text = re.sub(r"(\n!\[[^\]]*\]\([^)]+\))", r"\n\1", text)
     text = re.sub(r"(!\[[^\]]*\]\([^)]+\))\n(?!\n)", r"\1\n\n", text)
     text = re.sub(r"\n*(\$\$)", r"\n\n\1", text)
@@ -272,6 +415,50 @@ def _has_table_markup(markdown: str) -> bool:
     return "<table" in markdown.lower() or bool(re.search(r"^\|.+\|\s*$\n^\|[\s:\-|]+", markdown, re.MULTILINE))
 
 
+def _table_markup_count(markdown: str) -> int:
+    html_tables = len(re.findall(r"<table\b", markdown, flags=re.IGNORECASE))
+    markdown_tables = len(re.findall(r"^\|.+\|\s*$\n^\|[\s:\-|]+", markdown, flags=re.MULTILINE))
+    return html_tables + markdown_tables
+
+
+def _has_structured_table_data(block: PaperBlock) -> bool:
+    columns = block.get("columns", [])
+    rows = block.get("rows", [])
+    return (
+        isinstance(columns, Sequence)
+        and not isinstance(columns, (str, bytes))
+        and isinstance(rows, Sequence)
+        and not isinstance(rows, (str, bytes))
+        and len(columns) > 0
+        and len(rows) > 0
+    )
+
+
+def _replace_structured_table_markup(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
+    table_blocks = [
+        block for block in paper_blocks
+        if _block_text(block, "type") == "table" and _has_structured_table_data(block)
+    ]
+    if not table_blocks or not _has_table_markup(markdown):
+        return markdown
+
+    table_markup = re.compile(
+        r"<table\b.*?</table>|(?:^\|.+\|\s*$\n^\|[\s:\-|]+\|\s*$\n(?:^\|.*\|\s*$\n?)*)",
+        flags=re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
+    index = 0
+
+    def repl(match: re.Match[str]) -> str:
+        nonlocal index
+        if index >= len(table_blocks):
+            return match.group(0)
+        rendered = render_table_block_to_markdown(table_blocks[index])
+        index += 1
+        return rendered
+
+    return table_markup.sub(repl, markdown, count=len(table_blocks))
+
+
 def _looks_like_split_table(markdown: str) -> bool:
     lines = [line.strip() for line in markdown.splitlines()]
     run = 0
@@ -288,6 +475,8 @@ def _looks_like_split_table(markdown: str) -> bool:
 def _append_missing_structures(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
     additions: list[str] = []
     has_table_markup = _has_table_markup(markdown)
+    existing_table_count = _table_markup_count(markdown)
+    seen_table_blocks = 0
     split_table = _looks_like_split_table(markdown)
 
     for block in paper_blocks:
@@ -298,6 +487,9 @@ def _append_missing_structures(markdown: str, paper_blocks: Sequence[PaperBlock]
             if (path and path not in markdown) or (not path and caption and caption not in markdown):
                 additions.append(render_figure_block_to_markdown(block))
         elif block_type == "table":
+            seen_table_blocks += 1
+            if not split_table and seen_table_blocks <= existing_table_count:
+                continue
             caption = _block_text(block, "caption")
             if not has_table_markup or split_table or (caption and caption not in markdown):
                 additions.append(render_table_block_to_markdown(block))
@@ -352,14 +544,17 @@ def sanitize_markdown(
     text = _remove_references_section(text)
     text = _ensure_display_math_pairs(text)
     text = _replace_equation_image_links(text, paper_blocks)
+    text = _remove_remaining_equation_images(text)
     text = _convert_display_math_to_formula_areas(text)
     text = _strip_reference_citations(text)
     if normalize_inline_math:
         text = _normalize_inline_math_for_preview(text)
     if ensure_all_equations:
         text = _insert_missing_equations_into_summary(text, paper_blocks)
+    text = _replace_structured_table_markup(text, paper_blocks)
     text = _append_missing_structures(text, paper_blocks)
     text = _replace_equation_image_links(text, paper_blocks)
+    text = _remove_remaining_equation_images(text)
     text = _convert_display_math_to_formula_areas(text)
     text = _strip_reference_citations(text)
     return _normalize_spacing(text)

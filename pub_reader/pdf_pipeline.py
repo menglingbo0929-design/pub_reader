@@ -366,20 +366,14 @@ def _extract_plain_text(pdf_path: Path) -> tuple[str, str]:
         title = _guess_title(doc, pdf_path)
         start_page = _start_page_index(doc)
         parts: list[str] = []
-        reached_references = False
         for index in range(start_page, len(doc)):
             page = doc[index]
             page_parts: list[str] = []
             for element in _text_blocks_with_heading_levels(page, skip_first_page_metadata=(index == 0)):
-                if _is_references_heading(element.text):
-                    reached_references = True
-                    break
                 if element.text.strip():
                     page_parts.append(element.text)
             if page_parts:
                 parts.append(_prepare_text_for_model(_clean_text("\n\n".join(page_parts))))
-            if reached_references:
-                break
     return title, "\n\n".join(part for part in parts if part)
 
 
@@ -1225,6 +1219,26 @@ def _nearest_visual_cluster(
     else:
         x_window = fitz.Rect(group_bbox.x0 - 45, 0, group_bbox.x1 + 45, page.rect.height)
     x_window &= page.rect
+    is_figure_caption = caption_group[0].caption_kind == "figure"
+
+    def should_include_text_primitive(text_rect: fitz.Rect, cluster: fitz.Rect) -> bool:
+        if not is_figure_caption:
+            return not (text_rect & _expand_rect(cluster, page, margin=26)).is_empty
+
+        # Figure text can be part of the drawing (axis labels, legend labels, or
+        # node labels), but body paragraphs beside a wrapped figure should not be
+        # swept into the screenshot merely because they are close to the image.
+        tight_cluster = _expand_rect(cluster, page, margin=10)
+        center = fitz.Point(
+            (text_rect.x0 + text_rect.x1) / 2,
+            (text_rect.y0 + text_rect.y1) / 2,
+        )
+        center_inside = tight_cluster.x0 <= center.x <= tight_cluster.x1 and tight_cluster.y0 <= center.y <= tight_cluster.y1
+        meaningful_overlap = _overlap_ratio(text_rect, tight_cluster) > 0.35
+        likely_body_text = text_rect.width > page.rect.width * 0.38 and text_rect.height > 26
+        if likely_body_text and not meaningful_overlap:
+            return False
+        return center_inside or meaningful_overlap
 
     def cluster_from(candidates: list[Primitive], direction: str) -> fitz.Rect | None:
         non_text = [item for item in candidates if item.kind != "text"]
@@ -1274,7 +1288,7 @@ def _nearest_visual_cluster(
 
             text_window = _expand_rect(cluster, page, margin=26)
             for item in candidates:
-                if item.kind == "text" and not (item.bbox & text_window).is_empty:
+                if item.kind == "text" and not (item.bbox & text_window).is_empty and should_include_text_primitive(item.bbox, cluster):
                     cluster |= item.bbox
             return cluster & page.rect
 
@@ -1573,7 +1587,6 @@ def _structured_page_blocks(
     skip_text: set[int] = set()
     positioned_blocks: list[tuple[fitz.Rect, dict[str, Any]]] = []
     plain_parts: list[str] = []
-    reached_references = False
 
     for group in _caption_groups(caption_blocks):
         kind = group[0].caption_kind or "figure"
@@ -1638,6 +1651,9 @@ def _structured_page_blocks(
             table_block["rows"] = rows
         if html_path:
             table_block["html_path"] = html_path
+            html_file = tables_dir / Path(html_path).name
+            if html_file.exists():
+                table_block["html"] = html_file.read_text(encoding="utf-8")
         positioned_blocks.append((block_bbox, table_block))
         counters[kind] = caption_index + 1
 
@@ -1646,9 +1662,6 @@ def _structured_page_blocks(
         text = element.text.strip()
         if index in skip_text or _caption_kind(text) is not None:
             continue
-        if _is_references_heading(text):
-            reached_references = True
-            break
         block = _layout_text_to_block(element)
         if block is None:
             continue
@@ -1663,7 +1676,7 @@ def _structured_page_blocks(
     counters["equation"] = equation_index
 
     positioned_blocks.sort(key=lambda item: (int(item[0].y0 // 8), round(item[0].x0, 1)))
-    return [block for _bbox, block in positioned_blocks], "\n\n".join(plain_parts), reached_references
+    return [block for _bbox, block in positioned_blocks], "\n\n".join(plain_parts), False
 
 
 def _serialize_paper_blocks(blocks: list[dict[str, Any]]) -> str:
@@ -1745,9 +1758,8 @@ def extract_structured_paper_blocks(pdf_path: Path, output_dir: Path) -> tuple[s
     plain_text_parts: list[str] = [title]
     counters = {"figure": 1, "table": 1, "algorithm": 1, "equation": 1}
 
-    reached_references = False
     for page_index in range(start_page, len(doc)):
-        page_blocks, page_plain, reached_references = _structured_page_blocks(
+        page_blocks, page_plain, _ = _structured_page_blocks(
             doc[page_index],
             page_index + 1,
             figures_dir,
@@ -1758,8 +1770,6 @@ def extract_structured_paper_blocks(pdf_path: Path, output_dir: Path) -> tuple[s
         paper_blocks.extend(page_blocks)
         if page_plain:
             plain_text_parts.append(page_plain)
-        if reached_references:
-            break
     doc.close()
     return (
         title,
@@ -1776,7 +1786,6 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
     markdown_parts = [f"# {title}", ""]
     plain_text_parts: list[str] = []
     assets_dir = output_dir / "assets"
-    reached_references = False
 
     for page_index in range(start_page, len(doc)):
         page = doc[page_index]
@@ -1788,17 +1797,12 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
             assets_dir=assets_dir,
             page_number=page_index + 1,
         ):
-            if _is_references_heading(element.text):
-                reached_references = True
-                break
             if element.text.strip():
                 page_plain_parts.append(element.text)
             markdown_parts.append(_markdown_for_text_element(element))
             markdown_parts.append("")
         if page_plain_parts:
             plain_text_parts.append(_prepare_text_for_model(_clean_text("\n\n".join(page_plain_parts))))
-        if reached_references:
-            break
 
     doc.close()
     source_markdown = _prepare_text_for_model("\n".join(markdown_parts))
