@@ -666,12 +666,17 @@ def _numbered_equation_segments(
             for index in formula_indices[1:]:
                 formula_bbox |= lines[index][0]
         formula_text = _clean_text("\n".join(lines[index][1] for index in sorted(formula_indices)))
+        equation_crop = equation_rects.get(number_key) if equation_rects is not None else None
+        equation_name = equation_crop.filename if equation_crop else f"equation_{equation_index}"
+        equation_label = equation_crop.label if equation_crop else number_key
+        equation_image_bbox = equation_crop.rect if equation_crop else formula_bbox
+        equation_path = _save_page_clip(page, equation_image_bbox, assets_dir, equation_name, margin=10)
         elements.append(
             LayoutElement(
                 kind="equation",
                 bbox=formula_bbox,
                 text=formula_text,
-                markdown="",
+                markdown=f"![Equation {equation_label}]({equation_path})",
             )
         )
         consumed.update(formula_indices)
@@ -737,13 +742,24 @@ def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
                 number_lines,
                 key=lambda item: abs(((item[0].y0 + item[0].y1) / 2) - center),
             )[1]
-            close_to_number = abs(center - number_center) <= 16
+            close_to_number = abs(center - number_center) <= 24
             left_of_number = bbox.x0 < number_bbox.x0 - 4
+            compact_text = re.sub(r"\s+", " ", text.strip())
+            formula_band = (
+                bbox.x0 > page.rect.width * 0.08
+                and bbox.x1 < number_bbox.x0 + 6
+                and len(compact_text) <= 260
+                and not re.search(
+                    r"\b(the|this|that|where|which|therefore|because|can|formulated|follows|described)\b",
+                    compact_text,
+                    re.IGNORECASE,
+                )
+            )
             if (
                 nearest_number == number
                 and close_to_number
                 and left_of_number
-                and _looks_like_equation_fragment(text, bbox, page)
+                and (_looks_like_equation_fragment(text, bbox, page) or formula_band)
             ):
                 candidates.append(bbox)
 
@@ -764,7 +780,7 @@ def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
         previous_rect = grouped[-1][-1][1]
         vertical_gap = item[1].y0 - previous_rect.y1
         consecutive = int(item[0].strip("()")) == int(grouped[-1][-1][0].strip("()")) + 1
-        if consecutive and vertical_gap <= 18:
+        if consecutive and vertical_gap <= 26:
             grouped[-1].append(item)
         else:
             grouped.append([item])

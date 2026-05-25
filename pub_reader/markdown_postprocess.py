@@ -18,6 +18,10 @@ FORMULA_BLOCK_RE = re.compile(
     r"(?:<pre><code class=\"language-latex\">.*?</code></pre>|<div class=\"formula-block\".*?</div>)",
     re.DOTALL,
 )
+FORMULA_MARKUP_RE = re.compile(
+    r"(?:<pre><code class=\"language-latex\">.*?</code></pre>|<div class=\"formula-block\".*?</div>|\$\$.*?\$\$|\\\[.*?\\\])",
+    re.DOTALL,
+)
 
 
 def _block_text(block: PaperBlock, key: str) -> str:
@@ -29,6 +33,18 @@ def _block_number(block: PaperBlock, fallback: str = "") -> str:
     identifier = _block_text(block, "id")
     match = re.search(r"(\d+(?:_\d+)*)", identifier)
     return match.group(1).replace("_", "-") if match else fallback
+
+
+def _block_image_path(block: PaperBlock) -> str:
+    path = _block_text(block, "path")
+    match = re.search(r"!\[[^\]]*\]\(([^)]+)\)", path)
+    if match:
+        path = match.group(1).strip()
+    if not path:
+        markdown = _block_text(block, "markdown")
+        match = re.search(r"!\[[^\]]*\]\(([^)]+)\)", markdown)
+        path = match.group(1).strip() if match else ""
+    return path
 
 
 def _is_numeric_cell(value: str) -> bool:
@@ -119,7 +135,18 @@ def render_figure_block_to_markdown(figure_block: PaperBlock) -> str:
 def render_equation_block_to_markdown(equation_block: PaperBlock) -> str:
     latex = _block_text(equation_block, "latex")
     raw_text = _block_text(equation_block, "raw_text") or _block_text(equation_block, "text")
+    image_path = _block_image_path(equation_block)
     formula = latex or raw_text
+    if image_path:
+        path_number = re.search(r"equation[_-](\d+(?:_\d+)*)", image_path)
+        number = path_number.group(1).replace("_", "-") if path_number else _block_number(equation_block)
+        alt = f"公式 {number}" if number else "公式"
+        data_latex = html.escape(_strip_math_wrapper(formula), quote=True) if formula else ""
+        return (
+            f"<div class=\"formula-block\" data-latex=\"{data_latex}\">"
+            f"<img class=\"formula-image\" src=\"{html.escape(image_path, quote=True)}\" alt=\"{html.escape(alt, quote=True)}\">"
+            "</div>"
+        )
     if formula:
         return _formula_area(formula)
     return "> 公式未能可靠识别，请参考原 PDF 对应位置。"
@@ -391,6 +418,27 @@ def _convert_display_math_to_formula_areas(markdown: str) -> str:
     )
 
 
+def _replace_formula_markup_with_structured_equations(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
+    equations = [
+        block for block in paper_blocks
+        if _block_text(block, "type") == "equation"
+    ]
+    if not equations:
+        return markdown
+
+    index = 0
+
+    def repl(match: re.Match[str]) -> str:
+        nonlocal index
+        if index >= len(equations):
+            return match.group(0)
+        rendered = render_equation_block_to_markdown(equations[index])
+        index += 1
+        return rendered
+
+    return FORMULA_MARKUP_RE.sub(repl, markdown, count=len(equations))
+
+
 def _normalize_spacing(markdown: str) -> str:
     text = markdown.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -546,6 +594,7 @@ def sanitize_markdown(
     text = _replace_equation_image_links(text, paper_blocks)
     text = _remove_remaining_equation_images(text)
     text = _convert_display_math_to_formula_areas(text)
+    text = _replace_formula_markup_with_structured_equations(text, paper_blocks)
     text = _strip_reference_citations(text)
     if normalize_inline_math:
         text = _normalize_inline_math_for_preview(text)
@@ -556,5 +605,6 @@ def sanitize_markdown(
     text = _replace_equation_image_links(text, paper_blocks)
     text = _remove_remaining_equation_images(text)
     text = _convert_display_math_to_formula_areas(text)
+    text = _replace_formula_markup_with_structured_equations(text, paper_blocks)
     text = _strip_reference_citations(text)
     return _normalize_spacing(text)

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSplitter,
     QStatusBar,
     QStackedLayout,
@@ -147,35 +148,62 @@ class WorkerSignals(QObject):
 
 
 class ZoomTextBrowser(QTextBrowser):
+    zoomChanged = Signal(int)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._zoom_point_size = self.document().defaultFont().pointSizeF() or 10.0
+        self._base_point_size = self.document().defaultFont().pointSizeF() or 10.0
+        self._zoom_percent = 100
+
+    def set_zoom_percent(self, percent: int, emit: bool = True) -> None:
+        percent = max(60, min(220, int(percent)))
+        if percent == self._zoom_percent:
+            return
+        self._zoom_percent = percent
+        font = self.document().defaultFont()
+        font.setPointSizeF(self._base_point_size * percent / 100)
+        self.document().setDefaultFont(font)
+        self.viewport().update()
+        if emit:
+            self.zoomChanged.emit(percent)
+
+    def zoom_percent(self) -> int:
+        return self._zoom_percent
 
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         if event.modifiers() & Qt.ControlModifier:
-            step = 0.35 if event.angleDelta().y() > 0 else -0.35
-            self._zoom_point_size = max(7.5, min(22.0, self._zoom_point_size + step))
-            font = self.document().defaultFont()
-            font.setPointSizeF(self._zoom_point_size)
-            self.document().setDefaultFont(font)
-            self.viewport().update()
+            step = 1 if event.angleDelta().y() > 0 else -1
+            self.set_zoom_percent(self._zoom_percent + step)
             event.accept()
             return
         super().wheelEvent(event)
 
 
 class ZoomPdfView(QPdfView):
+    zoomChanged = Signal(int)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._zoom_percent = 100
         self.setPageMode(QPdfView.PageMode.MultiPage)
         self.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         self.setPageSpacing(12)
 
+    def set_zoom_percent(self, percent: int, emit: bool = True) -> None:
+        percent = max(40, min(240, int(percent)))
+        self._zoom_percent = percent
+        self.setZoomMode(QPdfView.ZoomMode.Custom)
+        self.setZoomFactor(percent / 100)
+        if emit:
+            self.zoomChanged.emit(percent)
+
+    def zoom_percent(self) -> int:
+        return self._zoom_percent
+
     def wheelEvent(self, event) -> None:  # type: ignore[override]
         if event.modifiers() & Qt.ControlModifier:
-            factor = 1.04 if event.angleDelta().y() > 0 else 0.96
-            self.setZoomMode(QPdfView.ZoomMode.Custom)
-            self.setZoomFactor(max(0.25, min(5.0, self.zoomFactor() * factor)))
+            step = 1 if event.angleDelta().y() > 0 else -1
+            self.set_zoom_percent(self._zoom_percent + step)
             event.accept()
             return
         super().wheelEvent(event)
@@ -293,6 +321,7 @@ class MainWindow(QMainWindow):
         self.log_entries: list[tuple[str, str]] = []
         self.last_progress_message = ""
         self._drag_overlay_visible = False
+        self._updating_zoom_controls = False
 
         self.setWindowTitle("Pub Reader")
         self.setMinimumSize(1120, 720)
@@ -692,8 +721,8 @@ class MainWindow(QMainWindow):
         self.preview_header_layout.setContentsMargins(18, 14, 18, 10)
         self.preview_header_layout.setSpacing(8)
         self.preview_tab_pdf = QPushButton("原论文预览")
-        self.preview_tab_translation = QPushButton("中文译文.md")
-        self.preview_tab_summary = QPushButton("Summary.md")
+        self.preview_tab_translation = QPushButton("中文译文")
+        self.preview_tab_summary = QPushButton("Summary")
         self.preview_tabs = [
             self.preview_tab_pdf,
             self.preview_tab_translation,
@@ -712,6 +741,28 @@ class MainWindow(QMainWindow):
         self.preview_meta_label = QLabel("")
         self.preview_meta_label.setObjectName("PreviewMeta")
         self.preview_header_layout.addWidget(self.preview_meta_label)
+        self.zoom_out_button = QPushButton("−")
+        self.zoom_out_button.setObjectName("ZoomButton")
+        self.zoom_out_button.setToolTip("缩小阅读内容")
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setObjectName("ZoomSlider")
+        self.zoom_slider.setRange(60, 220)
+        self.zoom_slider.setSingleStep(1)
+        self.zoom_slider.setPageStep(5)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setFixedWidth(118)
+        self.zoom_percent_label = QLabel("100%")
+        self.zoom_percent_label.setObjectName("ZoomPercent")
+        self.zoom_in_button = QPushButton("+")
+        self.zoom_in_button.setObjectName("ZoomButton")
+        self.zoom_in_button.setToolTip("放大阅读内容")
+        self.zoom_out_button.clicked.connect(lambda: self._nudge_preview_zoom(-5))
+        self.zoom_in_button.clicked.connect(lambda: self._nudge_preview_zoom(5))
+        self.zoom_slider.valueChanged.connect(self._apply_preview_zoom)
+        self.preview_header_layout.addWidget(self.zoom_out_button)
+        self.preview_header_layout.addWidget(self.zoom_slider)
+        self.preview_header_layout.addWidget(self.zoom_in_button)
+        self.preview_header_layout.addWidget(self.zoom_percent_label)
         self.detail_button = QPushButton("↗")
         self.detail_button.setObjectName("DetailButton")
         self.detail_button.setToolTip("进入详情阅读页")
@@ -748,6 +799,8 @@ class MainWindow(QMainWindow):
         self.preview_pdf_view = ZoomPdfView()
         self.preview_pdf_view.setObjectName("PdfReader")
         self.preview_pdf_view.setDocument(self.preview_pdf_doc)
+        self.detail.zoomChanged.connect(self._sync_zoom_controls)
+        self.preview_pdf_view.zoomChanged.connect(self._sync_zoom_controls)
         self.single_preview_stack.addWidget(self.detail)
         self.single_preview_stack.addWidget(self.preview_pdf_view)
         self._set_preview_html(
@@ -913,6 +966,8 @@ class MainWindow(QMainWindow):
         pdf_view = ZoomPdfView()
         pdf_view.setObjectName("DocumentPdfReader")
         pdf_view.setDocument(pdf_doc)
+        reader.zoomChanged.connect(self._sync_zoom_controls)
+        pdf_view.zoomChanged.connect(self._sync_zoom_controls)
         body_stack.addWidget(reader)
         body_stack.addWidget(pdf_view)
 
@@ -1451,7 +1506,7 @@ class MainWindow(QMainWindow):
                 background: #EEF2F7;
             }
             QPushButton#PreviewTabButton {
-                min-width: 112px;
+                min-width: 118px;
                 min-height: 42px;
                 border-radius: 8px;
                 border: 1px solid transparent;
@@ -1463,6 +1518,36 @@ class MainWindow(QMainWindow):
                 background: #FFFFFF;
                 color: #2563EB;
                 border-bottom: 3px solid #2563EB;
+            }
+            QPushButton#ZoomButton {
+                min-width: 24px;
+                max-width: 24px;
+                min-height: 24px;
+                max-height: 24px;
+                padding: 0;
+                border: 0;
+                background: transparent;
+                color: #334155;
+                font-size: 16px;
+            }
+            QPushButton#ZoomButton:hover {
+                background: #F1F5F9;
+                border-radius: 4px;
+            }
+            QSlider#ZoomSlider::groove:horizontal {
+                height: 2px;
+                background: #94A3B8;
+            }
+            QSlider#ZoomSlider::handle:horizontal {
+                width: 8px;
+                margin: -7px 0;
+                background: #64748B;
+                border-radius: 1px;
+            }
+            QLabel#ZoomPercent {
+                color: #334155;
+                min-width: 44px;
+                font-size: 13px;
             }
             QPushButton#DetailButton {
                 min-width: 38px;
@@ -1719,7 +1804,7 @@ class MainWindow(QMainWindow):
     def _apply_sidebar_width_mode(self) -> None:
         """Use a compact layout only while the full project sidebar is visible."""
         sidebar_open = self.sidebar_visible
-        tab_width = 96 if sidebar_open else 112
+        tab_width = 102 if sidebar_open else 118
         header_margins = (12, 14, 12, 10) if sidebar_open else (18, 14, 18, 10)
         header_spacing = 4 if sidebar_open else 8
         detail_size = 34 if sidebar_open else 38
@@ -1732,8 +1817,9 @@ class MainWindow(QMainWindow):
         self.preview_header_layout.setSpacing(header_spacing)
         for tab in self.preview_tabs:
             tab.setMinimumWidth(tab_width)
-            tab.setMaximumWidth(124 if sidebar_open else 16777215)
+            tab.setMaximumWidth(142 if sidebar_open else 16777215)
         self.detail_button.setFixedSize(detail_size, detail_size)
+        self.zoom_slider.setFixedWidth(76 if sidebar_open else 118)
 
         for card in getattr(self, "workflow_cards", []):
             card.setMinimumWidth(card_min_width)
@@ -1759,6 +1845,37 @@ class MainWindow(QMainWindow):
         }
         for name, button in buttons.items():
             button.setChecked(name == self.current_preview_tab)
+
+    def _preview_zoom_widgets(self) -> list[object]:
+        widgets: list[object] = [
+            self.detail,
+            self.preview_pdf_view,
+            getattr(self, "dual_left_reader", None),
+            getattr(self, "dual_left_pdf_view", None),
+            getattr(self, "dual_right_reader", None),
+            getattr(self, "dual_right_pdf_view", None),
+        ]
+        return [widget for widget in widgets if hasattr(widget, "set_zoom_percent")]
+
+    def _sync_zoom_controls(self, percent: int) -> None:
+        if self._updating_zoom_controls:
+            return
+        self._updating_zoom_controls = True
+        self.zoom_slider.setValue(max(self.zoom_slider.minimum(), min(self.zoom_slider.maximum(), int(percent))))
+        self.zoom_percent_label.setText(f"{int(percent)}%")
+        self._updating_zoom_controls = False
+
+    def _apply_preview_zoom(self, percent: int) -> None:
+        if self._updating_zoom_controls:
+            return
+        self._updating_zoom_controls = True
+        self.zoom_percent_label.setText(f"{int(percent)}%")
+        for widget in self._preview_zoom_widgets():
+            widget.set_zoom_percent(int(percent), emit=False)
+        self._updating_zoom_controls = False
+
+    def _nudge_preview_zoom(self, delta: int) -> None:
+        self.zoom_slider.setValue(max(self.zoom_slider.minimum(), min(self.zoom_slider.maximum(), self.zoom_slider.value() + delta)))
 
     def _event_belongs_to_window(self, obj: QObject | None) -> bool:
         if obj is self:
@@ -2156,8 +2273,12 @@ class MainWindow(QMainWindow):
                 padding: 12px 16px;
                 border: 1px solid #CBD5E1;
                 border-radius: 8px;
-                background: #F8FAFC;
+                background: #FFFFFF;
                 text-align: center;
+            }
+            .formula-image {
+                max-width: 100%;
+                background: #FFFFFF;
             }
             .formula-line {
                 font-family: "Cambria Math", "Times New Roman", serif;
@@ -2221,8 +2342,12 @@ class MainWindow(QMainWindow):
                       padding: 12px 16px;
                       border: 1px solid #CBD5E1;
                       border-radius: 8px;
-                      background: #F8FAFC;
+                      background: #FFFFFF;
                       text-align: center;
+                  }
+                  .formula-image {
+                      max-width: 100%;
+                      background: #FFFFFF;
                   }
                   .formula-line {
                       font-family: "Cambria Math", "Times New Roman", serif;
@@ -2276,6 +2401,8 @@ class MainWindow(QMainWindow):
             </html>
             """
         )
+        if isinstance(browser, ZoomTextBrowser):
+            browser.set_zoom_percent(self.zoom_slider.value(), emit=False)
         self.statusBar().showMessage(f"正在预览 Markdown：{path.name}")
 
     def _preview_pdf(self, path: Path) -> None:
@@ -2298,6 +2425,8 @@ class MainWindow(QMainWindow):
         view.setDocument(document)
         view.setPageMode(QPdfView.PageMode.MultiPage)
         view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        if self.zoom_slider.value() != 100:
+            view.set_zoom_percent(self.zoom_slider.value(), emit=False)
         if error != QPdfDocument.Error.None_ or document.status() != QPdfDocument.Status.Ready:
             self.statusBar().showMessage(f"PDF 打开失败：{path.name}")
             return
