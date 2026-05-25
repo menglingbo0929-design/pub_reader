@@ -9,6 +9,8 @@ import threading
 import html
 import json
 import ctypes
+import gc
+import time
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
@@ -450,6 +452,7 @@ class MainWindow(QMainWindow):
         self.library_tree.setIndentation(18)
         self.library_tree.setRootIsDecorated(False)
         self.library_tree.setExpandsOnDoubleClick(False)
+        self.library_tree.setFocusPolicy(Qt.NoFocus)
         self.library_tree.currentItemChanged.connect(self.on_tree_selection_changed)
         self.library_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
 
@@ -1216,6 +1219,8 @@ class MainWindow(QMainWindow):
                 min-height: 32px;
                 padding: 7px 10px;
                 border-radius: 8px;
+                border: none;
+                outline: 0;
             }
             QTreeWidget::item:hover {
                 background: #F0F5FF;
@@ -1223,6 +1228,12 @@ class MainWindow(QMainWindow):
             QTreeWidget::item:selected {
                 background: #E8F1FF;
                 color: #2563EB;
+                border: none;
+                outline: 0;
+            }
+            QTreeWidget::item:focus, QTreeWidget::item:selected:focus {
+                border: none;
+                outline: 0;
             }
             QTreeWidget::branch {
                 image: none;
@@ -2148,14 +2159,31 @@ class MainWindow(QMainWindow):
 
     def _force_remove_path(self, path: Path) -> None:
         def make_writable_and_retry(func, target, _exc_info) -> None:
-            os.chmod(target, stat.S_IWRITE)
+            try:
+                os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+            except OSError:
+                pass
             func(target)
 
-        if path.is_dir():
-            shutil.rmtree(path, onerror=make_writable_and_retry)
-        elif path.exists():
-            path.chmod(stat.S_IWRITE)
-            path.unlink()
+        last_error: OSError | None = None
+        for attempt in range(4):
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path, onerror=make_writable_and_retry)
+                elif path.exists() or path.is_symlink():
+                    try:
+                        path.chmod(stat.S_IWRITE | stat.S_IREAD)
+                    except OSError:
+                        pass
+                    path.unlink()
+                return
+            except OSError as exc:
+                last_error = exc
+                QApplication.processEvents()
+                gc.collect()
+                time.sleep(0.15 * (attempt + 1))
+        if last_error is not None:
+            raise last_error
 
     def _release_delete_handles(self, path: Path) -> None:
         if self._paths_overlap(self.current_preview_path, path):
@@ -2182,6 +2210,8 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     def _move_to_recycle_bin(self, path: Path) -> None:
+        if not path.exists() and not path.is_symlink():
+            return
         if sys.platform != "win32":
             self._force_remove_path(path)
             return
@@ -2205,8 +2235,11 @@ class MainWindow(QMainWindow):
         operation.pFrom = source
         operation.pTo = None
         operation.fFlags = 0x0040 | 0x0010 | 0x0004  # recycle bin, no confirm, silent
-        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
-        if result != 0 or operation.fAnyOperationsAborted:
+        try:
+            result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+        except OSError:
+            result = 1
+        if result != 0 or operation.fAnyOperationsAborted or path.exists():
             self._force_remove_path(path)
 
     def _set_selected_pdf_label(self, path: Path | None) -> None:
@@ -2406,9 +2439,13 @@ class MainWindow(QMainWindow):
             self._release_delete_handles(path)
             self._move_to_recycle_bin(path)
             preferred_path = path.parent if self._is_inside_library(path.parent) else None
-            self.current_folder = data.get("folder")
+            deleted_folder = data.get("folder")
+            if kind == "collection":
+                self.current_folder = None
+            elif deleted_folder and deleted_folder.path.exists():
+                self.current_folder = deleted_folder
             self.refresh_folders(preferred_path=preferred_path)
-        except OSError as exc:
+        except Exception as exc:
             QMessageBox.critical(self, "删除失败", str(exc))
 
     def choose_pdf(self) -> None:
