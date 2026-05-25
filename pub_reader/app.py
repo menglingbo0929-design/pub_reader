@@ -587,8 +587,8 @@ class MainWindow(QMainWindow):
         workflow_row.addWidget(
             self._make_workflow_card(
                 "2",
-                "领域术语与术语翻译",
-                "读取 abstract/introduction，判断领域并构建术语表",
+                "论文处理",
+                "整理正文、公式、图表与表格，准备当前生成任务",
                 self.workflow_badge_terms,
             ),
             1,
@@ -2256,6 +2256,29 @@ class MainWindow(QMainWindow):
         # direct removal path for files and folders.
         self._force_remove_path(path)
 
+    def _rename_collection_folder(self, folder: LibraryFolder, new_name: str) -> LibraryFolder:
+        target_name = self._clean_name(new_name)
+        if not target_name:
+            raise ValueError("请输入一个有效名称。")
+        old_path = folder.path
+        target = self.library.root / target_name
+        if old_path.resolve() == target.resolve():
+            return LibraryFolder(target.name, target)
+        if target.exists():
+            raise FileExistsError(f"{target} 已存在。")
+
+        self._release_delete_handles(old_path)
+        try:
+            old_path.rename(target)
+        except PermissionError:
+            shutil.copytree(old_path, target)
+            self._force_remove_path(old_path)
+
+        renamed = LibraryFolder(target.name, target)
+        if self.current_folder and self.current_folder.path.resolve() == old_path.resolve():
+            self.current_folder = renamed
+        return renamed
+
     def _set_selected_pdf_label(self, path: Path | None) -> None:
         if path is None:
             self.selected_pdf_label.setText("尚未选择 PDF")
@@ -2392,10 +2415,11 @@ class MainWindow(QMainWindow):
             return
         try:
             if kind == "collection":
-                renamed = self.library.rename_folder(data["folder"], path_name)
+                renamed = self._rename_collection_folder(data["folder"], path_name)
                 self.refresh_folders(preferred_path=renamed.path)
                 return
             if kind == "paper":
+                self._release_delete_handles(old_path)
                 metadata_path = old_path / "metadata.json"
                 metadata = {}
                 if metadata_path.exists():
@@ -2411,6 +2435,7 @@ class MainWindow(QMainWindow):
                 self.refresh_folders(preferred_path=old_path)
                 return
             else:
+                self._release_delete_handles(old_path)
                 if not self._is_inside_library(old_path):
                     QMessageBox.warning(self, "不能重命名", "只能重命名 output 目录内的文件或文件夹。")
                     return
@@ -2516,7 +2541,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress_status_label.setText("处理中...")
         self.last_progress_message = ""
-        self._set_workflow_badges("进行中", "待处理", "待生成")
+        self._set_processing_workflow(action, 0)
         self._append_log("开始生成中文译文。" if action == "translation" else "开始生成 Summary。")
         if action == "translation":
             self.translate_button.setText("取消译文")
@@ -2550,6 +2575,15 @@ class MainWindow(QMainWindow):
         elif self.active_action == "summary":
             self.summary_button.setEnabled(False)
 
+    def _set_processing_workflow(self, action: str, value: int) -> None:
+        output_label = "生成 Summary" if action == "summary" else "生成译文"
+        if value >= 42:
+            self._set_workflow_badges("已完成", "已完成", f"{output_label}中")
+        elif value >= 18:
+            self._set_workflow_badges("已完成", "处理中", "待生成")
+        else:
+            self._set_workflow_badges("处理中", "待处理", "待生成")
+
     def generate_outputs(self, action: str) -> None:
         if self.active_task:
             if action == self.active_action:
@@ -2582,12 +2616,7 @@ class MainWindow(QMainWindow):
     def on_progress(self, message: str, value: int) -> None:
         self.progress.setValue(value)
         self.progress_status_label.setText(f"{value}%")
-        if value >= 42:
-            self._set_workflow_badges("已完成", "已完成", "进行中")
-        elif value >= 30:
-            self._set_workflow_badges("已完成", "进行中", "待生成")
-        elif value >= 18:
-            self._set_workflow_badges("进行中", "待处理", "待生成")
+        self._set_processing_workflow(self.active_action or "translation", value)
         if message != self.last_progress_message:
             self._append_log(message)
             self.last_progress_message = message
