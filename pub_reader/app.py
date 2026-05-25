@@ -9,6 +9,8 @@ import threading
 import html
 import json
 import gc
+import hashlib
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -286,6 +288,7 @@ class MainWindow(QMainWindow):
         self.dual_picker_path: Path | None = None
         self.dual_left_path: Path | None = None
         self.dual_right_path: Path | None = None
+        self.pdf_preview_cache = Path(tempfile.mkdtemp(prefix="pub_reader_pdf_preview_"))
         self.log_entries: list[tuple[str, str]] = []
         self.last_progress_message = ""
 
@@ -1881,9 +1884,19 @@ class MainWindow(QMainWindow):
         self._preview_pdf_in_view(path, self.preview_pdf_view, self.preview_pdf_doc)
         self.single_preview_stack.setCurrentWidget(self.preview_pdf_view)
 
+    def _cached_pdf_preview_path(self, path: Path) -> Path:
+        stat_info = path.stat()
+        key_source = f"{path.resolve()}|{stat_info.st_size}|{stat_info.st_mtime_ns}"
+        cache_key = hashlib.sha1(key_source.encode("utf-8")).hexdigest()[:16]
+        cached = self.pdf_preview_cache / f"{path.stem}-{cache_key}.pdf"
+        if not cached.exists():
+            shutil.copy2(path, cached)
+        return cached
+
     def _preview_pdf_in_view(self, path: Path, view: ZoomPdfView, document: QPdfDocument) -> None:
         document.close()
-        error = document.load(str(path))
+        preview_path = self._cached_pdf_preview_path(path)
+        error = document.load(str(preview_path))
         view.setDocument(document)
         view.setPageMode(QPdfView.PageMode.MultiPage)
         view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
@@ -2633,6 +2646,11 @@ class MainWindow(QMainWindow):
             f"<p class='path'>{html.escape(str(path))}</p>",
             path if path.is_dir() else path.parent,
         )
+
+    def closeEvent(self, event) -> None:
+        self._release_all_pdf_documents()
+        shutil.rmtree(self.pdf_preview_cache, ignore_errors=True)
+        super().closeEvent(event)
 
 
 def main() -> None:
