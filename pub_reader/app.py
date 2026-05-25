@@ -8,10 +8,8 @@ import sys
 import threading
 import html
 import json
-import ctypes
 import gc
 import time
-from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +36,9 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QStackedLayout,
     QTextBrowser,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -58,6 +59,13 @@ from pub_reader.pdf_pipeline import (
 
 
 INVALID_NAME_RE = re.compile(r'[<>:"/\\|?*]+')
+
+
+class NoFocusItemDelegate(QStyledItemDelegate):
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
+        clean_option = QStyleOptionViewItem(option)
+        clean_option.state &= ~QStyle.State_HasFocus
+        super().paint(painter, clean_option, index)
 
 
 class ApiKeyDialog(QDialog):
@@ -453,6 +461,7 @@ class MainWindow(QMainWindow):
         self.library_tree.setRootIsDecorated(False)
         self.library_tree.setExpandsOnDoubleClick(False)
         self.library_tree.setFocusPolicy(Qt.NoFocus)
+        self.library_tree.setItemDelegate(NoFocusItemDelegate(self.library_tree))
         self.library_tree.currentItemChanged.connect(self.on_tree_selection_changed)
         self.library_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
 
@@ -2210,37 +2219,11 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     def _move_to_recycle_bin(self, path: Path) -> None:
-        if not path.exists() and not path.is_symlink():
-            return
-        if sys.platform != "win32":
-            self._force_remove_path(path)
-            return
-
-        class SHFILEOPSTRUCTW(ctypes.Structure):
-            _fields_ = [
-                ("hwnd", wintypes.HWND),
-                ("wFunc", wintypes.UINT),
-                ("pFrom", wintypes.LPCWSTR),
-                ("pTo", wintypes.LPCWSTR),
-                ("fFlags", wintypes.USHORT),
-                ("fAnyOperationsAborted", wintypes.BOOL),
-                ("hNameMappings", wintypes.LPVOID),
-                ("lpszProgressTitle", wintypes.LPCWSTR),
-            ]
-
-        source = str(path.resolve()) + "\0\0"
-        operation = SHFILEOPSTRUCTW()
-        operation.hwnd = 0
-        operation.wFunc = 3  # FO_DELETE
-        operation.pFrom = source
-        operation.pTo = None
-        operation.fFlags = 0x0040 | 0x0010 | 0x0004  # recycle bin, no confirm, silent
-        try:
-            result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
-        except OSError:
-            result = 1
-        if result != 0 or operation.fAnyOperationsAborted or path.exists():
-            self._force_remove_path(path)
+        # Windows' recycle-bin shell API can fail with stale Explorer state
+        # (for example error 124) while the file is otherwise deletable. The
+        # app-level delete command needs to be deterministic, so use the same
+        # direct removal path for files and folders.
+        self._force_remove_path(path)
 
     def _set_selected_pdf_label(self, path: Path | None) -> None:
         if path is None:
