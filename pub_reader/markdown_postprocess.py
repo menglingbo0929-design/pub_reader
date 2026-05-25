@@ -8,12 +8,13 @@ from typing import Any, Mapping, Sequence
 PaperBlock = Mapping[str, Any]
 
 REFERENCE_CITATION_RE = re.compile(
-    r"\s*\[(?:"
-    r"[A-Za-z][A-Za-z0-9]*\+?\d{2,4}(?:\s*[,;]\s*[A-Za-z][A-Za-z0-9]*\+?\d{2,4})*"
-    r"|"
-    r"\d{1,4}(?:\s*[,;]\s*\d{1,4})*"
-    r")\]"
+    r"\s*[\[\［](?=[^\]\］]{1,80}(?:\d|\+|[,;，；]))"
+    r"[A-Za-z0-9][A-Za-z0-9+.\-]*"
+    r"(?:\s*[,;，；]\s*[A-Za-z0-9][A-Za-z0-9+.\-]*)*"
+    r"[\]\］]"
 )
+
+FORMULA_BLOCK_RE = re.compile(r"<pre><code class=\"language-latex\">.*?</code></pre>", re.DOTALL)
 
 
 def _block_text(block: PaperBlock, key: str) -> str:
@@ -109,25 +110,24 @@ def render_figure_block_to_markdown(figure_block: PaperBlock) -> str:
 
 
 def render_equation_block_to_markdown(equation_block: PaperBlock) -> str:
-    path = _block_text(equation_block, "path")
-    number = _block_number(equation_block)
-    label = f"公式 {number}" if number else "公式"
-    if path:
-        return f"![{label}]({path})"
     latex = _block_text(equation_block, "latex")
     raw_text = _block_text(equation_block, "raw_text") or _block_text(equation_block, "text")
     formula = latex or raw_text
     if formula:
-        return f"$$\n{formula}\n$$"
+        return _formula_area(formula)
     return "> 公式未能可靠识别，请参考原 PDF 对应位置。"
+
+
+def _formula_area(formula: str) -> str:
+    content = html.escape(formula.strip())
+    return f"<pre><code class=\"language-latex\">{content}</code></pre>"
 
 
 def _strip_code_fence(markdown: str) -> str:
     text = markdown.strip()
-    text = re.sub(r"^```(?:markdown|md)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-    text = re.sub(r"(?im)^\s*```(?:markdown|md)?\s*$", "", text)
-    text = re.sub(r"(?m)^\s*```\s*$", "", text)
+    wrapper = re.match(r"^```(?:markdown|md)?\s*\n(?P<body>.*)\n```\s*$", text, flags=re.IGNORECASE | re.DOTALL)
+    if wrapper:
+        return wrapper.group("body").strip()
     return text.strip()
 
 
@@ -151,7 +151,23 @@ def _remove_references_section(markdown: str) -> str:
 
 
 def _strip_reference_citations(markdown: str) -> str:
-    text = REFERENCE_CITATION_RE.sub("", markdown)
+    parts = FORMULA_BLOCK_RE.split(markdown)
+    protected = FORMULA_BLOCK_RE.findall(markdown)
+    cleaned_parts = []
+    for part in parts:
+        cleaned = REFERENCE_CITATION_RE.sub("", part)
+        cleaned = re.sub(r" {2,}", " ", cleaned)
+        cleaned = re.sub(r" +([,.;:，。；：）)])", r"\1", cleaned)
+        cleaned_parts.append(cleaned)
+    text = ""
+    for index, part in enumerate(cleaned_parts):
+        text += part
+        if index < len(protected):
+            text += protected[index]
+    text = re.sub(r"(?im)^\s*\d+\s+https?://\S+.*$", "", text)
+    text = re.sub(r"(?im)^\s*(?:\*|∗)?\s*(?:equal contribution|contact person|corresponding author|project page|code)\b.*$", "", text)
+    text = re.sub(r"(?im)^\s*(?:第\s*\d+\s*届)?\s*神经信息处理系统大会.*$", "", text)
+    text = re.sub(r"(?im)^.*Conference on Neural Information Processing Systems.*$", "", text)
     text = re.sub(r" {2,}", " ", text)
     text = re.sub(r" +([,.;:，。；：）)])", r"\1", text)
     return text
@@ -191,25 +207,47 @@ def _normalize_inline_math_for_preview(markdown: str) -> str:
     return re.sub(r"\\\((.+?)\\\)", lambda match: _plain_inline_math(match.group(1)), markdown)
 
 
-def _replace_display_math_with_equation_images(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
+def _replace_equation_image_links(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
     equations = [
         block for block in paper_blocks
-        if _block_text(block, "type") == "equation" and _block_text(block, "path")
+        if _block_text(block, "type") == "equation"
     ]
     if not equations:
         return markdown
 
-    index = 0
+    by_number = {_block_number(block): block for block in equations if _block_number(block)}
+    by_path = {_block_text(block, "path"): block for block in equations if _block_text(block, "path")}
 
     def repl(match: re.Match[str]) -> str:
-        nonlocal index
-        if index >= len(equations):
-            return match.group(0)
-        rendered = render_equation_block_to_markdown(equations[index])
-        index += 1
-        return rendered
+        alt = match.group(1)
+        path = match.group(2)
+        number_match = re.search(r"(\d+(?:_\d+)*)", alt) or re.search(r"equation[_-](\d+(?:_\d+)*)", path)
+        key = number_match.group(1).replace("_", "-") if number_match else ""
+        block = by_number.get(key) or by_path.get(path)
+        return render_equation_block_to_markdown(block) if block else match.group(0)
 
-    return re.sub(r"\$\$\s*.*?\s*\$\$", repl, markdown, flags=re.DOTALL)
+    return re.sub(r"!\[([^\]]*)\]\(([^)]*equation[^)]*)\)", repl, markdown, flags=re.IGNORECASE)
+
+
+def _convert_display_math_to_formula_areas(markdown: str) -> str:
+    text = re.sub(
+        r"```(?:latex|tex|math)\s*\n(.*?)\n```",
+        lambda match: _formula_area(match.group(1)),
+        markdown,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"\$\$\s*(.*?)\s*\$\$",
+        lambda match: _formula_area(match.group(1)),
+        text,
+        flags=re.DOTALL,
+    )
+    return re.sub(
+        r"\\\[\s*(.*?)\s*\\\]",
+        lambda match: _formula_area(match.group(1)),
+        text,
+        flags=re.DOTALL,
+    )
 
 
 def _normalize_spacing(markdown: str) -> str:
@@ -267,17 +305,38 @@ def _append_missing_structures(markdown: str, paper_blocks: Sequence[PaperBlock]
         elif block_type == "equation":
             latex = _block_text(block, "latex")
             raw = _block_text(block, "raw_text")
-            path = _block_text(block, "path")
-            if path and path not in markdown:
+            if latex and latex not in markdown and html.escape(latex) not in markdown:
                 additions.append(render_equation_block_to_markdown(block))
-            elif latex and latex not in markdown:
-                additions.append(render_equation_block_to_markdown(block))
-            elif not latex and raw and raw not in markdown and "$$" not in markdown:
+            elif not latex and raw and raw not in markdown and html.escape(raw) not in markdown:
                 additions.append(render_equation_block_to_markdown(block))
 
     if not additions:
         return markdown
-    return markdown.rstrip() + "\n\n## 结构化内容兜底\n\n" + "\n\n".join(additions) + "\n"
+    return markdown.rstrip() + "\n\n" + "\n\n".join(additions) + "\n"
+
+
+def _insert_missing_equations_into_summary(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
+    missing: list[str] = []
+    for block in paper_blocks:
+        if _block_text(block, "type") != "equation":
+            continue
+        latex = _block_text(block, "latex")
+        raw = _block_text(block, "raw_text")
+        formula = latex or raw
+        if not formula:
+            continue
+        if formula in markdown or html.escape(formula) in markdown:
+            continue
+        number = _block_number(block)
+        title = f"### 公式 {number}" if number else "### 公式"
+        missing.append(f"{title}\n\n{render_equation_block_to_markdown(block)}")
+    if not missing:
+        return markdown
+    section = "\n\n### 补充公式\n\n" + "\n\n".join(missing) + "\n"
+    marker = "\n## 实验设计"
+    if marker in markdown:
+        return markdown.replace(marker, section + marker, 1)
+    return markdown.rstrip() + section
 
 
 def sanitize_markdown(
@@ -286,15 +345,21 @@ def sanitize_markdown(
     *,
     render_equation_images: bool = False,
     normalize_inline_math: bool = False,
+    ensure_all_equations: bool = False,
 ) -> str:
     text = _strip_code_fence(markdown)
     text = _strip_preface(text)
     text = _remove_references_section(text)
-    text = _strip_reference_citations(text)
     text = _ensure_display_math_pairs(text)
-    if render_equation_images:
-        text = _replace_display_math_with_equation_images(text, paper_blocks)
+    text = _replace_equation_image_links(text, paper_blocks)
+    text = _convert_display_math_to_formula_areas(text)
+    text = _strip_reference_citations(text)
     if normalize_inline_math:
         text = _normalize_inline_math_for_preview(text)
+    if ensure_all_equations:
+        text = _insert_missing_equations_into_summary(text, paper_blocks)
     text = _append_missing_structures(text, paper_blocks)
+    text = _replace_equation_image_links(text, paper_blocks)
+    text = _convert_display_math_to_formula_areas(text)
+    text = _strip_reference_citations(text)
     return _normalize_spacing(text)

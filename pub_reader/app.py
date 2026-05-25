@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import sys
 import threading
 import html
@@ -2140,12 +2141,49 @@ class MainWindow(QMainWindow):
         except ValueError:
             return False
 
+    def _paths_overlap(self, left: Path | None, right: Path | None) -> bool:
+        if left is None or right is None:
+            return False
+        return self._path_is_inside(left, right) or self._path_is_inside(right, left)
+
+    def _force_remove_path(self, path: Path) -> None:
+        def make_writable_and_retry(func, target, _exc_info) -> None:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+
+        if path.is_dir():
+            shutil.rmtree(path, onerror=make_writable_and_retry)
+        elif path.exists():
+            path.chmod(stat.S_IWRITE)
+            path.unlink()
+
+    def _release_delete_handles(self, path: Path) -> None:
+        if self._paths_overlap(self.current_preview_path, path):
+            self.current_preview_path = None
+            self.preview_pdf_doc.close()
+            self.single_preview_stack.setCurrentWidget(self.detail)
+            self._set_preview_html(
+                "<h2>已删除</h2><p class='muted'>当前预览文件已被删除，请重新选择论文或文件。</p>",
+                self.library.root,
+            )
+        if self._paths_overlap(self.dual_left_path, path):
+            self.dual_left_path = None
+            self.dual_anchor_path = None
+            self.dual_left_pdf_doc.close()
+        if self._paths_overlap(self.dual_right_path, path):
+            self.dual_right_path = None
+            self.dual_picker_path = None
+            self.dual_right_pdf_doc.close()
+        if self._paths_overlap(self.current_pdf, path):
+            self.current_pdf = None
+            self._set_selected_pdf_label(None)
+        if self.current_paper is not None and self._path_is_inside(self.current_paper.path, path):
+            self.current_paper = None
+        QApplication.processEvents()
+
     def _move_to_recycle_bin(self, path: Path) -> None:
         if sys.platform != "win32":
-            if path.is_dir():
-                shutil.rmtree(path)
-            elif path.exists():
-                path.unlink()
+            self._force_remove_path(path)
             return
 
         class SHFILEOPSTRUCTW(ctypes.Structure):
@@ -2168,10 +2206,8 @@ class MainWindow(QMainWindow):
         operation.pTo = None
         operation.fFlags = 0x0040 | 0x0010 | 0x0004  # recycle bin, no confirm, silent
         result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
-        if result != 0:
-            raise OSError(f"移动到回收站失败，错误码：{result}")
-        if operation.fAnyOperationsAborted:
-            raise OSError("删除操作已取消。")
+        if result != 0 or operation.fAnyOperationsAborted:
+            self._force_remove_path(path)
 
     def _set_selected_pdf_label(self, path: Path | None) -> None:
         if path is None:
@@ -2367,15 +2403,10 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.Yes:
             return
         try:
-            deleted_current_pdf = self.current_pdf is not None and self._path_is_inside(self.current_pdf, path)
+            self._release_delete_handles(path)
             self._move_to_recycle_bin(path)
             preferred_path = path.parent if self._is_inside_library(path.parent) else None
             self.current_folder = data.get("folder")
-            if deleted_current_pdf:
-                self.current_pdf = None
-                self._set_selected_pdf_label(None)
-            if self.current_paper is not None and self._path_is_inside(self.current_paper.path, path):
-                self.current_paper = None
             self.refresh_folders(preferred_path=preferred_path)
         except OSError as exc:
             QMessageBox.critical(self, "删除失败", str(exc))

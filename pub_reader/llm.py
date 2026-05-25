@@ -185,24 +185,192 @@ class DeepSeekClient:
         total = len(chunk_list)
         for index, chunk in enumerate(chunk_list, start=1):
             check_cancelled(cancel_check)
-            content = (
-                f"论文领域信息：\n{field_context.to_prompt_text()}\n\n"
-                + TRANSLATION_USER_PROMPT.replace("{{paper_blocks}}", chunk)
-            )
-            translated.append(
-                self.complete(
-                    [
-                        {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
-                        {"role": "user", "content": content},
-                    ],
-                    temperature=0.1,
-                    cancel_check=cancel_check,
-                )
-            )
+            translated.append(self._translate_block_chunk_with_retry(chunk, field_context, cancel_check))
             check_cancelled(cancel_check)
             if progress:
                 progress(index, total)
         return translated
+
+    def _translate_block_chunk_with_retry(
+        self,
+        chunk: str,
+        field_context: FieldContext,
+        cancel_check: CancelCheck | None,
+        depth: int = 0,
+    ) -> str:
+        output = self._translate_block_chunk_once(chunk, field_context, cancel_check)
+        blocks = self._decode_block_chunk(chunk)
+        if not self._should_split_retry(blocks, output, depth):
+            return output
+
+        split_blocks = self._split_blocks_for_retry(blocks)
+        if split_blocks is None:
+            return output
+        left_blocks, right_blocks = split_blocks
+        left = json.dumps(left_blocks, ensure_ascii=False, indent=2)
+        right = json.dumps(right_blocks, ensure_ascii=False, indent=2)
+        return "\n\n".join(
+            [
+                self._translate_block_chunk_with_retry(left, field_context, cancel_check, depth + 1),
+                self._translate_block_chunk_with_retry(right, field_context, cancel_check, depth + 1),
+            ]
+        )
+
+    def _translate_block_chunk_once(
+        self,
+        chunk: str,
+        field_context: FieldContext,
+        cancel_check: CancelCheck | None,
+    ) -> str:
+        content = (
+            f"论文领域信息：\n{field_context.to_prompt_text()}\n\n"
+            + TRANSLATION_USER_PROMPT.replace("{{paper_blocks}}", chunk)
+        )
+        return self.complete(
+            [
+                {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.1,
+            cancel_check=cancel_check,
+        )
+
+    def _decode_block_chunk(self, chunk: str) -> list[dict[str, object]]:
+        try:
+            data = json.loads(chunk)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
+    def _block_source_length(self, block: dict[str, object]) -> int:
+        total = 0
+        for key in ("text", "content", "raw_text", "latex", "caption"):
+            value = block.get(key)
+            if isinstance(value, str):
+                total += len(value)
+        columns = block.get("columns")
+        if isinstance(columns, list):
+            total += sum(len(str(item)) for item in columns)
+        rows = block.get("rows")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, list):
+                    total += sum(len(str(cell)) for cell in row)
+        return total
+
+    def _split_blocks_for_retry(
+        self,
+        blocks: list[dict[str, object]],
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+        if len(blocks) > 1:
+            midpoint = max(1, len(blocks) // 2)
+            return blocks[:midpoint], blocks[midpoint:]
+
+        if not blocks:
+            return None
+        block = dict(blocks[0])
+        text_key = next((key for key in ("text", "content") if isinstance(block.get(key), str)), "")
+        if not text_key:
+            return None
+        text = str(block[text_key])
+        if len(text) < 1800:
+            return None
+
+        split_at = self._split_text_index(text)
+        left_text = text[:split_at].strip()
+        right_text = text[split_at:].strip()
+        if not left_text or not right_text:
+            return None
+        left_block = dict(block)
+        right_block = dict(block)
+        left_block[text_key] = left_text
+        right_block[text_key] = right_text
+        return [left_block], [right_block]
+
+    def _split_text_index(self, text: str) -> int:
+        midpoint = len(text) // 2
+        candidate_positions = [
+            text.rfind("\n\n", 0, midpoint + 500),
+            text.rfind(". ", 0, midpoint + 500),
+            text.rfind("。", 0, midpoint + 500),
+            text.find("\n\n", max(0, midpoint - 500)),
+            text.find(". ", max(0, midpoint - 500)),
+            text.find("。", max(0, midpoint - 500)),
+        ]
+        valid = [position for position in candidate_positions if position > 0]
+        if not valid:
+            return midpoint
+        return min(valid, key=lambda position: abs(position - midpoint)) + 1
+
+    def _should_split_retry(self, blocks: list[dict[str, object]], output: str, depth: int) -> bool:
+        if depth >= 3 or not blocks:
+            return False
+        source_len = sum(self._block_source_length(block) for block in blocks)
+        if source_len < 2800:
+            return False
+        refusal_or_truncation = any(
+            marker in output
+            for marker in (
+                "由于篇幅",
+                "篇幅限制",
+                "无法完整",
+                "其余内容",
+                "后续部分",
+                "以下省略",
+                "未完",
+                "省略",
+                "continued",
+            )
+        )
+        if refusal_or_truncation:
+            return True
+        text_like_blocks = sum(1 for block in blocks if str(block.get("type", "")) in {"paragraph", "heading", "section"})
+        return text_like_blocks >= 4 and len(output.strip()) < source_len * 0.24
+
+    def _compact_blocks_for_summary(self, paper_blocks: str, max_chars: int = 55000) -> str:
+        blocks = self._decode_block_chunk(paper_blocks)
+        if not blocks:
+            return paper_blocks[:max_chars]
+
+        required_types = {"heading", "equation", "table", "figure"}
+        selected: list[tuple[int, dict[str, object]]] = []
+        selected_indexes: set[int] = set()
+        current_len = 2
+
+        def compact_block(block: dict[str, object]) -> dict[str, object]:
+            result = dict(block)
+            if str(result.get("type", "")) == "paragraph":
+                text = str(result.get("text", ""))
+                if len(text) > 1400:
+                    result["text"] = text[:1400].rstrip() + " …"
+            return result
+
+        def add_block(index: int, block: dict[str, object], *, force: bool = False) -> None:
+            nonlocal current_len
+            if index in selected_indexes:
+                return
+            compacted = compact_block(block)
+            encoded = json.dumps(compacted, ensure_ascii=False)
+            if not force and current_len + len(encoded) + 4 > max_chars:
+                return
+            selected.append((index, compacted))
+            selected_indexes.add(index)
+            current_len += len(encoded) + 4
+
+        for index, block in enumerate(blocks):
+            if str(block.get("type", "")) in required_types:
+                add_block(index, block, force=True)
+
+        for index, block in enumerate(blocks):
+            block_type = str(block.get("type", ""))
+            if block_type in required_types:
+                continue
+            add_block(index, block)
+
+        selected.sort(key=lambda item: item[0])
+        return json.dumps([item for _index, item in selected], ensure_ascii=False, indent=2)
 
     def summarize(
         self,
@@ -239,9 +407,10 @@ class DeepSeekClient:
         field_context: FieldContext,
         cancel_check: CancelCheck | None = None,
     ) -> str:
+        compact_blocks = self._compact_blocks_for_summary(paper_blocks)
         content = SUMMARY_USER_PROMPT.replace("{{paper_title}}", paper_title).replace(
             "{{paper_blocks}}",
-            f"论文领域信息：\n{field_context.to_prompt_text()}\n\n{paper_blocks[:55000]}",
+            f"论文领域信息：\n{field_context.to_prompt_text()}\n\n{compact_blocks}",
         )
         return self.complete(
             [

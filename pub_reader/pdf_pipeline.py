@@ -371,7 +371,7 @@ def _extract_plain_text(pdf_path: Path) -> tuple[str, str]:
             page = doc[index]
             page_parts: list[str] = []
             for element in _text_blocks_with_heading_levels(page, skip_first_page_metadata=(index == 0)):
-                if element.heading_level is not None and _is_references_heading(element.text):
+                if _is_references_heading(element.text):
                     reached_references = True
                     break
                 if element.text.strip():
@@ -553,12 +553,18 @@ def _heading_level(text: str, font_size: float, is_bold: bool, page_font_size: f
 def _is_references_heading(text: str) -> bool:
     normalized = re.sub(r"^\d+(\.\d+)*\s+", "", text.strip(), flags=re.IGNORECASE)
     normalized = normalized.strip(" .:：").lower()
-    return normalized in {"references", "bibliography", "reference"}
+    return normalized in {"references", "bibliography", "reference", "参考文献"}
 
 
 def _is_noise_block(text: str, bbox: fitz.Rect, page: fitz.Page, font_size: float = 0.0) -> bool:
     stripped = text.strip()
     if not stripped:
+        return True
+    if re.search(
+        r"(Conference on Neural Information Processing Systems|NeurIPS\s*2025|第\s*\d+\s*届\s*神经信息处理系统大会)",
+        stripped,
+        re.IGNORECASE,
+    ):
         return True
     if re.fullmatch(r"\d+", stripped) and bbox.y0 > page.rect.height * 0.88:
         return True
@@ -666,18 +672,12 @@ def _numbered_equation_segments(
             for index in formula_indices[1:]:
                 formula_bbox |= lines[index][0]
         formula_text = _clean_text("\n".join(lines[index][1] for index in sorted(formula_indices)))
-        rel_path = ""
-        if equation_rects is not None and number_key in equation_rects:
-            crop = equation_rects[number_key]
-            figures_dir = assets_dir
-            figures_dir.mkdir(parents=True, exist_ok=True)
-            rel_path = _save_page_clip(page, formula_bbox, figures_dir, crop.filename, margin=8)
         elements.append(
             LayoutElement(
                 kind="equation",
                 bbox=formula_bbox,
                 text=formula_text,
-                markdown=rel_path,
+                markdown="",
             )
         )
         consumed.update(formula_indices)
@@ -1319,6 +1319,43 @@ def _nearest_visual_cluster(
     return None, "above"
 
 
+def _valid_figure_crop(
+    page: fitz.Page,
+    crop_rect: fitz.Rect | None,
+    caption_group: list[TextBlock],
+    raw_text_blocks: list[LayoutElement],
+    primitives: list[Primitive],
+) -> bool:
+    if crop_rect is None or crop_rect.get_area() < 900:
+        return False
+    page_area = max(page.rect.get_area(), 1)
+    if crop_rect.get_area() / page_area > 0.72:
+        return False
+
+    has_visual_primitive = any(
+        primitive.kind != "text"
+        and not (primitive.bbox & crop_rect).is_empty
+        and _overlap_ratio(primitive.bbox, crop_rect) > 0.08
+        for primitive in primitives
+    )
+    if not has_visual_primitive:
+        return False
+
+    caption_boxes = [block.bbox for block in caption_group]
+    long_body_hits = 0
+    for block in raw_text_blocks:
+        if not block.text or _caption_kind(block.text) is not None:
+            continue
+        if any(_overlap_ratio(block.bbox, caption_box) > 0.75 for caption_box in caption_boxes):
+            continue
+        if _overlap_ratio(block.bbox, crop_rect) <= 0.28:
+            continue
+        words = re.findall(r"[A-Za-z]{2,}|[\u4e00-\u9fff]", block.text)
+        if len(block.text) > 260 or len(words) > 55:
+            long_body_hits += 1
+    return long_body_hits <= 1
+
+
 def _layout_elements(page: fitz.Page, page_number: int, assets_dir: Path) -> list[LayoutElement]:
     text_blocks = _text_blocks(page)
     primitives = _primitive_rects(page, text_blocks)
@@ -1542,6 +1579,8 @@ def _structured_page_blocks(
         kind = group[0].caption_kind or "figure"
         caption = _caption_text(group)
         crop_rect, _ = _nearest_visual_cluster(page, group, primitives)
+        if kind == "figure" and not _valid_figure_crop(page, crop_rect, group, raw_text_blocks, primitives):
+            crop_rect = None
         caption_index = counters.get(kind, 1)
         caption_number = _caption_number(caption, caption_index)
         skip_text.update(_caption_indices(group, raw_text_blocks))
@@ -1607,7 +1646,7 @@ def _structured_page_blocks(
         text = element.text.strip()
         if index in skip_text or _caption_kind(text) is not None:
             continue
-        if element.heading_level is not None and _is_references_heading(text):
+        if _is_references_heading(text):
             reached_references = True
             break
         block = _layout_text_to_block(element)
@@ -1631,11 +1670,58 @@ def _serialize_paper_blocks(blocks: list[dict[str, Any]]) -> str:
     return json.dumps(blocks, ensure_ascii=False, indent=2)
 
 
-def _split_paper_block_chunks(blocks: list[dict[str, Any]], max_chars: int = 22000) -> list[str]:
+def _split_text_for_prompt(text: str, max_chars: int) -> list[str]:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text] if text else []
+
+    pieces = re.split(r"(\n\n+|(?<=[.!?。！？])\s+)", text)
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        if not piece:
+            continue
+        if len(current) + len(piece) <= max_chars:
+            current += piece
+            continue
+        if current.strip():
+            chunks.append(current.strip())
+        current = piece
+        while len(current) > max_chars:
+            chunks.append(current[:max_chars].strip())
+            current = current[max_chars:]
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks
+
+
+def _split_large_prompt_block(block: dict[str, Any], max_chars: int) -> list[dict[str, Any]]:
+    block_type = str(block.get("type", "")).strip()
+    if block_type not in {"paragraph", "section"}:
+        return [block]
+    text_key = "text" if isinstance(block.get("text"), str) else "content" if isinstance(block.get("content"), str) else ""
+    if not text_key:
+        return [block]
+    text = str(block.get(text_key, ""))
+    if len(text) <= max_chars:
+        return [block]
+    result: list[dict[str, Any]] = []
+    for chunk in _split_text_for_prompt(text, max_chars):
+        chunk_block = dict(block)
+        chunk_block[text_key] = chunk
+        result.append(chunk_block)
+    return result or [block]
+
+
+def _split_paper_block_chunks(blocks: list[dict[str, Any]], max_chars: int = 8000) -> list[str]:
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_len = 2
+    prompt_blocks: list[dict[str, Any]] = []
     for block in blocks:
+        prompt_blocks.extend(_split_large_prompt_block(block, max_chars - 800))
+
+    for block in prompt_blocks:
         encoded = json.dumps(block, ensure_ascii=False)
         block_len = len(encoded) + 4
         if current and current_len + block_len > max_chars:
@@ -1702,7 +1788,7 @@ def extract_markdown_skeleton(pdf_path: Path, output_dir: Path) -> tuple[str, st
             assets_dir=assets_dir,
             page_number=page_index + 1,
         ):
-            if element.heading_level is not None and _is_references_heading(element.text):
+            if _is_references_heading(element.text):
                 reached_references = True
                 break
             if element.text.strip():
@@ -1772,7 +1858,26 @@ def generate_translation(
         cancel_check=cancel_check,
     )
     check_cancelled(cancel_check)
-    translated_md = sanitize_markdown("\n\n".join(translated_blocks), paper_blocks)
+    sanitized_chunks: list[str] = []
+    for raw_chunk, source_chunk in zip(translated_blocks, block_chunks):
+        try:
+            source_blocks = json.loads(source_chunk)
+            if not isinstance(source_blocks, list):
+                source_blocks = []
+        except json.JSONDecodeError:
+            source_blocks = []
+        sanitized_chunks.append(
+            sanitize_markdown(
+                raw_chunk,
+                source_blocks,
+                normalize_inline_math=True,
+            )
+        )
+    translated_md = sanitize_markdown(
+        "\n\n".join(sanitized_chunks),
+        paper_blocks,
+        normalize_inline_math=True,
+    )
 
     translated_path = paper_dir / "translated.md"
     _write_text_atomic(translated_path, translated_md, cancel_check)
@@ -1834,8 +1939,8 @@ def generate_summary(
     summary = sanitize_markdown(
         summary_raw,
         summary_fallback_blocks,
-        render_equation_images=True,
         normalize_inline_math=True,
+        ensure_all_equations=True,
     )
     summary_path = paper_dir / "summary.md"
     _write_text_atomic(summary_path, summary, cancel_check)
