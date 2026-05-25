@@ -2194,11 +2194,31 @@ class MainWindow(QMainWindow):
         if last_error is not None:
             raise last_error
 
+    def _replace_pdf_document(self, attr_name: str, view: ZoomPdfView) -> None:
+        old_document = getattr(self, attr_name, None)
+        new_document = QPdfDocument(self)
+        view.setDocument(new_document)
+        setattr(self, attr_name, new_document)
+        if old_document is not None:
+            old_document.close()
+            old_document.deleteLater()
+
+    def _release_all_pdf_documents(self) -> None:
+        self.single_preview_stack.setCurrentWidget(self.detail)
+        self.dual_left_stack.setCurrentWidget(self.dual_left_reader)
+        self.dual_right_stack.setCurrentWidget(self.dual_right_reader)
+        self._replace_pdf_document("preview_pdf_doc", self.preview_pdf_view)
+        self._replace_pdf_document("dual_left_pdf_doc", self.dual_left_pdf_view)
+        self._replace_pdf_document("dual_right_pdf_doc", self.dual_right_pdf_view)
+        for _ in range(4):
+            QApplication.processEvents()
+            gc.collect()
+            time.sleep(0.1)
+
     def _release_delete_handles(self, path: Path) -> None:
+        self._release_all_pdf_documents()
         if self._paths_overlap(self.current_preview_path, path):
             self.current_preview_path = None
-            self.preview_pdf_doc.close()
-            self.single_preview_stack.setCurrentWidget(self.detail)
             self._set_preview_html(
                 "<h2>已删除</h2><p class='muted'>当前预览文件已被删除，请重新选择论文或文件。</p>",
                 self.library.root,
@@ -2206,11 +2226,9 @@ class MainWindow(QMainWindow):
         if self._paths_overlap(self.dual_left_path, path):
             self.dual_left_path = None
             self.dual_anchor_path = None
-            self.dual_left_pdf_doc.close()
         if self._paths_overlap(self.dual_right_path, path):
             self.dual_right_path = None
             self.dual_picker_path = None
-            self.dual_right_pdf_doc.close()
         if self._paths_overlap(self.current_pdf, path):
             self.current_pdf = None
             self._set_selected_pdf_label(None)
