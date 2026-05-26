@@ -35,7 +35,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QSizePolicy,
-    QSlider,
     QSplitter,
     QStatusBar,
     QStackedLayout,
@@ -148,14 +147,12 @@ class WorkerSignals(QObject):
 
 
 class ZoomTextBrowser(QTextBrowser):
-    zoomChanged = Signal(int)
-
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._base_point_size = self.document().defaultFont().pointSizeF() or 10.0
         self._zoom_percent = 100
 
-    def set_zoom_percent(self, percent: int, emit: bool = True) -> None:
+    def set_zoom_percent(self, percent: int) -> None:
         percent = max(60, min(220, int(percent)))
         if percent == self._zoom_percent:
             return
@@ -164,8 +161,6 @@ class ZoomTextBrowser(QTextBrowser):
         font.setPointSizeF(self._base_point_size * percent / 100)
         self.document().setDefaultFont(font)
         self.viewport().update()
-        if emit:
-            self.zoomChanged.emit(percent)
 
     def zoom_percent(self) -> int:
         return self._zoom_percent
@@ -180,8 +175,6 @@ class ZoomTextBrowser(QTextBrowser):
 
 
 class ZoomPdfView(QPdfView):
-    zoomChanged = Signal(int)
-
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._zoom_percent = 100
@@ -189,13 +182,11 @@ class ZoomPdfView(QPdfView):
         self.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         self.setPageSpacing(12)
 
-    def set_zoom_percent(self, percent: int, emit: bool = True) -> None:
+    def set_zoom_percent(self, percent: int) -> None:
         percent = max(40, min(240, int(percent)))
         self._zoom_percent = percent
         self.setZoomMode(QPdfView.ZoomMode.Custom)
         self.setZoomFactor(percent / 100)
-        if emit:
-            self.zoomChanged.emit(percent)
 
     def zoom_percent(self) -> int:
         return self._zoom_percent
@@ -321,7 +312,6 @@ class MainWindow(QMainWindow):
         self.log_entries: list[tuple[str, str]] = []
         self.last_progress_message = ""
         self._drag_overlay_visible = False
-        self._updating_zoom_controls = False
 
         self.setWindowTitle("Pub Reader")
         self.setMinimumSize(1120, 720)
@@ -741,28 +731,6 @@ class MainWindow(QMainWindow):
         self.preview_meta_label = QLabel("")
         self.preview_meta_label.setObjectName("PreviewMeta")
         self.preview_header_layout.addWidget(self.preview_meta_label)
-        self.zoom_out_button = QPushButton("−")
-        self.zoom_out_button.setObjectName("ZoomButton")
-        self.zoom_out_button.setToolTip("缩小阅读内容")
-        self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setObjectName("ZoomSlider")
-        self.zoom_slider.setRange(60, 220)
-        self.zoom_slider.setSingleStep(1)
-        self.zoom_slider.setPageStep(5)
-        self.zoom_slider.setValue(100)
-        self.zoom_slider.setFixedWidth(118)
-        self.zoom_percent_label = QLabel("100%")
-        self.zoom_percent_label.setObjectName("ZoomPercent")
-        self.zoom_in_button = QPushButton("+")
-        self.zoom_in_button.setObjectName("ZoomButton")
-        self.zoom_in_button.setToolTip("放大阅读内容")
-        self.zoom_out_button.clicked.connect(lambda: self._nudge_preview_zoom(-5))
-        self.zoom_in_button.clicked.connect(lambda: self._nudge_preview_zoom(5))
-        self.zoom_slider.valueChanged.connect(self._apply_preview_zoom)
-        self.preview_header_layout.addWidget(self.zoom_out_button)
-        self.preview_header_layout.addWidget(self.zoom_slider)
-        self.preview_header_layout.addWidget(self.zoom_in_button)
-        self.preview_header_layout.addWidget(self.zoom_percent_label)
         self.detail_button = QPushButton("↗")
         self.detail_button.setObjectName("DetailButton")
         self.detail_button.setToolTip("进入详情阅读页")
@@ -799,8 +767,6 @@ class MainWindow(QMainWindow):
         self.preview_pdf_view = ZoomPdfView()
         self.preview_pdf_view.setObjectName("PdfReader")
         self.preview_pdf_view.setDocument(self.preview_pdf_doc)
-        self.detail.zoomChanged.connect(self._sync_zoom_controls)
-        self.preview_pdf_view.zoomChanged.connect(self._sync_zoom_controls)
         self.single_preview_stack.addWidget(self.detail)
         self.single_preview_stack.addWidget(self.preview_pdf_view)
         self._set_preview_html(
@@ -966,8 +932,6 @@ class MainWindow(QMainWindow):
         pdf_view = ZoomPdfView()
         pdf_view.setObjectName("DocumentPdfReader")
         pdf_view.setDocument(pdf_doc)
-        reader.zoomChanged.connect(self._sync_zoom_controls)
-        pdf_view.zoomChanged.connect(self._sync_zoom_controls)
         body_stack.addWidget(reader)
         body_stack.addWidget(pdf_view)
 
@@ -1519,36 +1483,6 @@ class MainWindow(QMainWindow):
                 color: #2563EB;
                 border-bottom: 3px solid #2563EB;
             }
-            QPushButton#ZoomButton {
-                min-width: 24px;
-                max-width: 24px;
-                min-height: 24px;
-                max-height: 24px;
-                padding: 0;
-                border: 0;
-                background: transparent;
-                color: #334155;
-                font-size: 16px;
-            }
-            QPushButton#ZoomButton:hover {
-                background: #F1F5F9;
-                border-radius: 4px;
-            }
-            QSlider#ZoomSlider::groove:horizontal {
-                height: 2px;
-                background: #94A3B8;
-            }
-            QSlider#ZoomSlider::handle:horizontal {
-                width: 8px;
-                margin: -7px 0;
-                background: #64748B;
-                border-radius: 1px;
-            }
-            QLabel#ZoomPercent {
-                color: #334155;
-                min-width: 44px;
-                font-size: 13px;
-            }
             QPushButton#DetailButton {
                 min-width: 38px;
                 max-width: 38px;
@@ -1702,32 +1636,40 @@ class MainWindow(QMainWindow):
                 .path { color: #64748B; font-size: 13px; }
                 .small { font-size: 12px; }
                 .dual-drop-card {
-                    margin: 46px auto;
-                    max-width: 520px;
-                    padding: 38px 34px;
+                    margin: 76px auto 0 auto;
+                    width: 72%;
+                    max-width: 560px;
+                    min-width: 360px;
+                    padding: 26px 24px 28px 24px;
                     text-align: center;
                     border: 1px dashed #CBD5E1;
-                    border-radius: 22px;
-                    background: #F8FAFC;
+                    border-radius: 18px;
+                    background: #FFFFFF;
                 }
-                .dual-drop-icon {
-                    width: 68px;
-                    height: 68px;
-                    margin: 0 auto 14px auto;
-                    border-radius: 20px;
-                    color: #FFFFFF;
-                    background: #2563EB;
-                    font-size: 38px;
-                    line-height: 68px;
+                .dual-drop-title {
+                    color: #2563EB;
+                    font-size: 22px;
                     font-weight: 800;
+                    margin: 12px 0 8px 0;
                 }
                 .open-button {
                     display: inline-block;
-                    margin-top: 8px;
-                    padding: 11px 22px;
+                    min-width: 190px;
+                    margin: 0 auto 18px auto;
+                    padding: 13px 24px;
                     color: #FFFFFF;
                     background: #2563EB;
                     border-radius: 10px;
+                    font-size: 17px;
+                    font-weight: 700;
+                }
+                .dual-file-card {
+                    margin: 16px auto 0 auto;
+                    padding: 10px 14px;
+                    border: 1px solid #E2E8F0;
+                    border-radius: 10px;
+                    background: #F8FAFC;
+                    color: #0F172A;
                 }
                 .pdf-page {
                     margin: 18px 0 28px 0;
@@ -1819,8 +1761,6 @@ class MainWindow(QMainWindow):
             tab.setMinimumWidth(tab_width)
             tab.setMaximumWidth(142 if sidebar_open else 16777215)
         self.detail_button.setFixedSize(detail_size, detail_size)
-        self.zoom_slider.setFixedWidth(76 if sidebar_open else 118)
-
         for card in getattr(self, "workflow_cards", []):
             card.setMinimumWidth(card_min_width)
             card.setMinimumHeight(card_min_height)
@@ -1845,37 +1785,6 @@ class MainWindow(QMainWindow):
         }
         for name, button in buttons.items():
             button.setChecked(name == self.current_preview_tab)
-
-    def _preview_zoom_widgets(self) -> list[object]:
-        widgets: list[object] = [
-            self.detail,
-            self.preview_pdf_view,
-            getattr(self, "dual_left_reader", None),
-            getattr(self, "dual_left_pdf_view", None),
-            getattr(self, "dual_right_reader", None),
-            getattr(self, "dual_right_pdf_view", None),
-        ]
-        return [widget for widget in widgets if hasattr(widget, "set_zoom_percent")]
-
-    def _sync_zoom_controls(self, percent: int) -> None:
-        if self._updating_zoom_controls:
-            return
-        self._updating_zoom_controls = True
-        self.zoom_slider.setValue(max(self.zoom_slider.minimum(), min(self.zoom_slider.maximum(), int(percent))))
-        self.zoom_percent_label.setText(f"{int(percent)}%")
-        self._updating_zoom_controls = False
-
-    def _apply_preview_zoom(self, percent: int) -> None:
-        if self._updating_zoom_controls:
-            return
-        self._updating_zoom_controls = True
-        self.zoom_percent_label.setText(f"{int(percent)}%")
-        for widget in self._preview_zoom_widgets():
-            widget.set_zoom_percent(int(percent), emit=False)
-        self._updating_zoom_controls = False
-
-    def _nudge_preview_zoom(self, delta: int) -> None:
-        self.zoom_slider.setValue(max(self.zoom_slider.minimum(), min(self.zoom_slider.maximum(), self.zoom_slider.value() + delta)))
 
     def _event_belongs_to_window(self, obj: QObject | None) -> bool:
         if obj is self:
@@ -2401,8 +2310,6 @@ class MainWindow(QMainWindow):
             </html>
             """
         )
-        if isinstance(browser, ZoomTextBrowser):
-            browser.set_zoom_percent(self.zoom_slider.value(), emit=False)
         self.statusBar().showMessage(f"正在预览 Markdown：{path.name}")
 
     def _preview_pdf(self, path: Path) -> None:
@@ -2425,8 +2332,6 @@ class MainWindow(QMainWindow):
         view.setDocument(document)
         view.setPageMode(QPdfView.PageMode.MultiPage)
         view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
-        if self.zoom_slider.value() != 100:
-            view.set_zoom_percent(self.zoom_slider.value(), emit=False)
         if error != QPdfDocument.Error.None_ or document.status() != QPdfDocument.Status.Ready:
             self.statusBar().showMessage(f"PDF 打开失败：{path.name}")
             return
@@ -2446,11 +2351,10 @@ class MainWindow(QMainWindow):
             self._set_browser_html(
                 text_browser,
                 "<div class='dual-drop-card'>"
-                "<div class='dual-drop-icon'>⇧</div>"
-                f"<h2>{html.escape(empty_title)}</h2>"
+                "<p><a class='open-button' href='pubreader://choose-dual-file'>⇧ 打开文件</a></p>"
+                f"<div class='dual-drop-title'>{html.escape(empty_title)}</div>"
                 "<p class='muted'>拖拽 PDF 或 Markdown 到这里，或点击按钮打开文件。</p>"
-                "<p><a class='open-button' href='pubreader://choose-dual-file'>打开文件</a></p>"
-                "<p class='muted small'>支持 .pdf 与 .md；该文件只用于当前双栏阅读，不会替代原论文。</p>"
+                "<div class='dual-file-card'>支持 .pdf 与 .md；该文件只用于当前双栏阅读，不会替代原论文。</div>"
                 "</div>",
                 self.library.root,
             )
