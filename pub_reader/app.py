@@ -49,10 +49,16 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QUrl
 
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except Exception:  # pragma: no cover - fallback for minimal PySide installs.
+    QWebEngineView = None
+
 from pub_reader.cancel import GenerationCancelled
 from pub_reader.config import load_config
 from pub_reader.library import LibraryFolder, LibraryManager, PaperRecord
 from pub_reader.llm import DeepSeekClient, DeepSeekError
+from pub_reader.markdown_postprocess import prepare_markdown_for_preview
 from pub_reader.pdf_pipeline import (
     PaperOutputs,
     _prepare_paper_workspace,
@@ -146,32 +152,68 @@ class WorkerSignals(QObject):
     canceled = Signal(str)
 
 
-class ZoomTextBrowser(QTextBrowser):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._base_point_size = self.document().defaultFont().pointSizeF() or 10.0
-        self._zoom_percent = 100
+if QWebEngineView is not None:
+    class ZoomTextBrowser(QWebEngineView):
+        anchorClicked = Signal(QUrl)
 
-    def set_zoom_percent(self, percent: int) -> None:
-        percent = max(60, min(220, int(percent)))
-        if percent == self._zoom_percent:
-            return
-        self._zoom_percent = percent
-        font = self.document().defaultFont()
-        font.setPointSizeF(self._base_point_size * percent / 100)
-        self.document().setDefaultFont(font)
-        self.viewport().update()
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._zoom_percent = 100
+            self._search_paths: list[str] = []
 
-    def zoom_percent(self) -> int:
-        return self._zoom_percent
+        def set_zoom_percent(self, percent: int) -> None:
+            percent = max(60, min(220, int(percent)))
+            if percent == self._zoom_percent:
+                return
+            self._zoom_percent = percent
+            self.setZoomFactor(percent / 100)
 
-    def wheelEvent(self, event) -> None:  # type: ignore[override]
-        if event.modifiers() & Qt.ControlModifier:
-            step = 1 if event.angleDelta().y() > 0 else -1
-            self.set_zoom_percent(self._zoom_percent + step)
-            event.accept()
-            return
-        super().wheelEvent(event)
+        def zoom_percent(self) -> int:
+            return self._zoom_percent
+
+        def setSearchPaths(self, paths: list[str]) -> None:  # QTextBrowser compatibility.
+            self._search_paths = paths
+
+        def setOpenExternalLinks(self, value: bool) -> None:  # QTextBrowser compatibility.
+            return None
+
+        def setOpenLinks(self, value: bool) -> None:  # QTextBrowser compatibility.
+            return None
+
+        def wheelEvent(self, event) -> None:  # type: ignore[override]
+            if event.modifiers() & Qt.ControlModifier:
+                step = 1 if event.angleDelta().y() > 0 else -1
+                self.set_zoom_percent(self._zoom_percent + step)
+                event.accept()
+                return
+            super().wheelEvent(event)
+else:
+    class ZoomTextBrowser(QTextBrowser):
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._base_point_size = self.document().defaultFont().pointSizeF() or 10.0
+            self._zoom_percent = 100
+
+        def set_zoom_percent(self, percent: int) -> None:
+            percent = max(60, min(220, int(percent)))
+            if percent == self._zoom_percent:
+                return
+            self._zoom_percent = percent
+            font = self.document().defaultFont()
+            font.setPointSizeF(self._base_point_size * percent / 100)
+            self.document().setDefaultFont(font)
+            self.viewport().update()
+
+        def zoom_percent(self) -> int:
+            return self._zoom_percent
+
+        def wheelEvent(self, event) -> None:  # type: ignore[override]
+            if event.modifiers() & Qt.ControlModifier:
+                step = 1 if event.angleDelta().y() > 0 else -1
+                self.set_zoom_percent(self._zoom_percent + step)
+                event.accept()
+                return
+            super().wheelEvent(event)
 
 
 class ZoomPdfView(QPdfView):
@@ -1612,9 +1654,7 @@ class MainWindow(QMainWindow):
         if browser is self.detail:
             self.single_preview_stack.setCurrentWidget(self.detail)
         base_path = base_path or self.library.root
-        browser.setSearchPaths([str(base_path)])
-        browser.document().setBaseUrl(QUrl.fromLocalFile(str(base_path) + os.sep))
-        browser.setHtml(
+        document_html = (
             """
             <style>
                 body {
@@ -1688,6 +1728,12 @@ class MainWindow(QMainWindow):
             """
             + body
         )
+        if QWebEngineView is not None and isinstance(browser, QWebEngineView):
+            browser.setHtml(document_html, QUrl.fromLocalFile(str(base_path) + os.sep))
+            return
+        browser.setSearchPaths([str(base_path)])
+        browser.document().setBaseUrl(QUrl.fromLocalFile(str(base_path) + os.sep))
+        browser.setHtml(document_html)
 
     def toggle_sidebar(self) -> None:
         sizes = self.splitter.sizes()
@@ -2044,10 +2090,25 @@ class MainWindow(QMainWindow):
 
     def _preview_markdown_to_html(self, markdown: str) -> str:
         """Render generated Markdown into HTML while preserving raw table blocks."""
+        inline_math_re = re.compile(r"(\\\(.*?\\\)|\$(?!\$).*?(?<!\\)\$)")
+
+        def safe_math(text: str) -> str:
+            return re.sub(r"</?(?:script|style)[^>]*>", "", text, flags=re.IGNORECASE).strip()
+
         def inline(text: str) -> str:
-            escaped = html.escape(text)
-            escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
-            return re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+            pieces = inline_math_re.split(text)
+            rendered: list[str] = []
+            for piece in pieces:
+                if not piece:
+                    continue
+                if inline_math_re.fullmatch(piece):
+                    rendered.append(safe_math(piece))
+                    continue
+                escaped = html.escape(piece)
+                escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+                escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+                rendered.append(escaped)
+            return "".join(rendered)
 
         def render_pipe_table(lines: list[str]) -> str:
             rows = [[cell.strip() for cell in line.strip().strip("|").split("|")] for line in lines]
@@ -2104,6 +2165,36 @@ class MainWindow(QMainWindow):
                     index += 1
                 html_parts.append("\n".join(raw))
                 continue
+            if stripped == "$$":
+                flush_paragraph()
+                formula_lines: list[str] = []
+                index += 1
+                while index < len(lines):
+                    if lines[index].strip() == "$$":
+                        index += 1
+                        break
+                    formula_lines.append(lines[index])
+                    index += 1
+                formula = safe_math("\n".join(formula_lines))
+                if formula:
+                    html_parts.append(f"<div class=\"formula-block\">$$\n{formula}\n$$</div>")
+                continue
+            if stripped.startswith(r"\["):
+                flush_paragraph()
+                formula_lines: list[str] = [stripped[2:]]
+                index += 1
+                while index < len(lines):
+                    current = lines[index].strip()
+                    if current.endswith(r"\]"):
+                        formula_lines.append(current[:-2])
+                        index += 1
+                        break
+                    formula_lines.append(lines[index])
+                    index += 1
+                formula = safe_math("\n".join(part for part in formula_lines))
+                if formula:
+                    html_parts.append(f"<div class=\"formula-block\">$$\n{formula}\n$$</div>")
+                continue
             image = re.match(r"!\[(?P<alt>[^\]]*)\]\((?P<src>[^)]+)\)", stripped)
             if image:
                 flush_paragraph()
@@ -2151,13 +2242,11 @@ class MainWindow(QMainWindow):
             markdown = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
             markdown = path.read_text(encoding="utf-8", errors="replace")
+        markdown = prepare_markdown_for_preview(markdown)
 
-        # Keep relative equation images such as assets/equation_1.png readable
-        # inside the embedded Markdown preview.
-        browser.setSearchPaths([str(path.parent), str(path.parent / "assets")])
-        browser.document().setBaseUrl(QUrl.fromLocalFile(str(path.parent) + os.sep))
-        browser.document().setDefaultStyleSheet(
-            """
+        # Keep relative images such as figures/figure_1.png readable inside the
+        # embedded Markdown preview.
+        preview_css = """
             body {
                 font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
                 color: #1F2937;
@@ -2178,12 +2267,13 @@ class MainWindow(QMainWindow):
                 margin-bottom: 0.35em;
             }
             .formula-block {
-                margin: 0.9em 0;
-                padding: 12px 16px;
-                border: 1px solid #CBD5E1;
-                border-radius: 8px;
+                margin: 0.55em 0;
+                padding: 6px 10px;
+                border: 1px solid #E2E8F0;
+                border-radius: 6px;
                 background: #FFFFFF;
                 text-align: center;
+                overflow-x: auto;
             }
             .formula-image {
                 max-width: 100%;
@@ -2209,98 +2299,62 @@ class MainWindow(QMainWindow):
             table {
                 border-collapse: collapse;
                 border: 1px solid #CBD5E1;
+                margin: 0.9em 0;
+                max-width: 100%;
             }
             th {
                 background: #F8FAFC;
+                font-weight: 700;
             }
             th, td {
                 border: 1px solid #CBD5E1;
                 padding: 6px 8px;
+                vertical-align: top;
             }
-            """
-        )
+            img {
+                max-width: 100%;
+            }
+            figure {
+                margin: 0.2em 0 0.2em 0;
+            }
+            figure img {
+                display: block;
+                margin: 0 auto;
+            }
+            figcaption {
+                color: #64748B;
+                margin-top: 0.08em;
+                line-height: 1.35;
+            }
+            figure + p, figure + h1, figure + h2, figure + h3, figure + h4 {
+                margin-top: 0.35em;
+            }
+        """
         preview_html = self._preview_markdown_to_html(markdown)
-        browser.setHtml(
+        document_html = (
             """
             <!doctype html>
             <html>
               <head>
                 <meta charset="utf-8">
                 <style>
-                  body {
-                      font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-                      color: #1F2937;
-                      line-height: 1.65;
-                      background: #FFFFFF;
-                  }
-                  h1, h2, h3, h4 {
-                      color: #2563EB;
-                      font-weight: 700;
-                  }
-                  p, li {
-                      color: #1F2937;
-                  }
-                  p {
-                      margin: 0 0 0.8em 0;
-                  }
-                  li {
-                      margin-bottom: 0.35em;
-                  }
-                  .formula-block {
-                      margin: 0.9em 0;
-                      padding: 12px 16px;
-                      border: 1px solid #CBD5E1;
-                      border-radius: 8px;
-                      background: #FFFFFF;
-                      text-align: center;
-                  }
-                  .formula-image {
-                      max-width: 100%;
-                      background: #FFFFFF;
-                  }
-                  .formula-line {
-                      font-family: "Cambria Math", "Times New Roman", serif;
-                      font-size: 16px;
-                      white-space: nowrap;
-                  }
-                  code {
-                      background: #F8FAFC;
-                      border: 1px solid #E2E8F0;
-                      border-radius: 6px;
-                      padding: 2px 5px;
-                  }
-                  pre {
-                      background: #F8FAFC;
-                      border: 1px solid #E2E8F0;
-                      border-radius: 8px;
-                      padding: 12px;
-                  }
-                  table {
-                      border-collapse: collapse;
-                      border: 1px solid #CBD5E1;
-                      margin: 0.9em 0;
-                      max-width: 100%;
-                  }
-                  th {
-                      background: #F8FAFC;
-                      font-weight: 700;
-                  }
-                  th, td {
-                      border: 1px solid #CBD5E1;
-                      padding: 6px 8px;
-                      vertical-align: top;
-                  }
-                  img {
-                      max-width: 100%;
-                  }
-                  figure {
-                      margin: 1em 0;
-                  }
-                  figcaption {
-                      color: #64748B;
-                      margin-top: 0.35em;
-                  }
+            """
+            + preview_css
+            + """
                 </style>
+                <script>
+                  window.MathJax = {
+                    tex: {
+                      inlineMath: [['\\\\(', '\\\\)'], ['$', '$']],
+                      displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
+                      processEscapes: true,
+                      processEnvironments: true,
+                      packages: {'[+]': ['ams']}
+                    },
+                    svg: { fontCache: 'global' }
+                  };
+                </script>
+                <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
               </head>
               <body>
             """
@@ -2310,6 +2364,13 @@ class MainWindow(QMainWindow):
             </html>
             """
         )
+        if QWebEngineView is not None and isinstance(browser, QWebEngineView):
+            browser.setHtml(document_html, QUrl.fromLocalFile(str(path.parent) + os.sep))
+        else:
+            browser.setSearchPaths([str(path.parent), str(path.parent / "assets")])
+            browser.document().setBaseUrl(QUrl.fromLocalFile(str(path.parent) + os.sep))
+            browser.document().setDefaultStyleSheet(preview_css)
+            browser.setHtml(document_html)
         self.statusBar().showMessage(f"正在预览 Markdown：{path.name}")
 
     def _preview_pdf(self, path: Path) -> None:

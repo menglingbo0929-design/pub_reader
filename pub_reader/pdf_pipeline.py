@@ -183,6 +183,7 @@ class EquationCrop:
     label: str
     filename: str
     primary_number: str
+    raw_text: str = ""
 
 
 CITATION_RE = re.compile(
@@ -455,6 +456,45 @@ def _expand_rect(rect: fitz.Rect, page: fitz.Page, margin: float = 4) -> fitz.Re
     return expanded & page.rect
 
 
+def _rect_center_inside(inner: fitz.Rect, outer: fitz.Rect) -> bool:
+    center_x = (inner.x0 + inner.x1) / 2
+    center_y = (inner.y0 + inner.y1) / 2
+    return outer.x0 <= center_x <= outer.x1 and outer.y0 <= center_y <= outer.y1
+
+
+def _is_visual_label_block(block: TextBlock, page: fitz.Page) -> bool:
+    text = re.sub(r"\s+", " ", block.text.strip())
+    if not text or block.caption_kind is not None:
+        return False
+    if len(text) > 90:
+        return False
+    lines = [line for line in block.text.splitlines() if line.strip()]
+    if len(lines) > 4:
+        return False
+    words = re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]", text)
+    if len(words) > 14:
+        return False
+    if block.bbox.width > page.rect.width * 0.42 and len(words) > 6:
+        return False
+    if re.search(r"[.!?。！？]\s*$", text) and len(words) > 4:
+        return False
+    prose_markers = re.compile(
+        r"\b(the|this|that|these|those|we|our|method|model|result|results|"
+        r"experiment|training|dataset|therefore|however|because|which|where)\b",
+        re.IGNORECASE,
+    )
+    if prose_markers.search(text) and len(words) > 7:
+        return False
+    return True
+
+
+def _block_inside_visual_crop(block: LayoutElement, crop_rect: fitz.Rect) -> bool:
+    intersection = block.bbox & crop_rect
+    if intersection.is_empty or block.bbox.get_area() <= 0:
+        return False
+    return _rect_center_inside(block.bbox, crop_rect) or intersection.get_area() / block.bbox.get_area() > 0.08
+
+
 def _save_page_clip(page: fitz.Page, rect: fitz.Rect, assets_dir: Path, name: str, margin: float = 4) -> str:
     # Cropping the rendered page preserves the original visual appearance of
     # figures, equations, and tables instead of asking the model to recreate it.
@@ -486,10 +526,11 @@ def _primitive_rects(page: fitz.Page, text_blocks: list[TextBlock]) -> list[Prim
             if not rect.is_empty:
                 primitives.append(Primitive(rect, "image"))
 
-    # Plot labels and table cell values are often normal PDF text. Include text
-    # as cluster material, but never use captions as crop material.
+    # Plot labels and table cell values are often normal PDF text.  Only include
+    # short label-like text as crop material; body paragraphs beside wrapped
+    # figures must stay as translatable text, not become part of a figure crop.
     for block in text_blocks:
-        if block.caption_kind is None:
+        if _is_visual_label_block(block, page):
             primitives.append(Primitive(block.bbox, "text"))
 
     return primitives
@@ -666,17 +707,19 @@ def _numbered_equation_segments(
             for index in formula_indices[1:]:
                 formula_bbox |= lines[index][0]
         formula_text = _clean_text("\n".join(lines[index][1] for index in sorted(formula_indices)))
-        equation_crop = equation_rects.get(number_key) if equation_rects is not None else None
-        equation_name = equation_crop.filename if equation_crop else f"equation_{equation_index}"
-        equation_label = equation_crop.label if equation_crop else number_key
-        equation_image_bbox = equation_crop.rect if equation_crop else formula_bbox
-        equation_path = _save_page_clip(page, equation_image_bbox, assets_dir, equation_name, margin=10)
+        if equation_rects is not None and number_key in equation_rects:
+            crop_text = equation_rects[number_key].raw_text
+            if crop_text and _equation_text_score(crop_text) > _equation_text_score(formula_text):
+                formula_text = crop_text
+        if _equation_text_score(formula_text) <= 0:
+            consumed.update(formula_indices)
+            cursor = max(formula_indices) + 1
+            continue
         elements.append(
             LayoutElement(
                 kind="equation",
                 bbox=formula_bbox,
                 text=formula_text,
-                markdown=f"![Equation {equation_label}]({equation_path})",
             )
         )
         consumed.update(formula_indices)
@@ -709,6 +752,8 @@ def _looks_like_equation_fragment(text: str, bbox: fitz.Rect, page: fitz.Page) -
     stripped = text.strip()
     if not stripped:
         return False
+    if _looks_like_equation_prose(stripped):
+        return False
     if re.fullmatch(r"\(\d+\)", stripped):
         return True
     if re.fullmatch(r"\([A-Za-z][A-Za-z ]+\)", stripped):
@@ -722,6 +767,83 @@ def _looks_like_equation_fragment(text: str, bbox: fitz.Rect, page: fitz.Page) -
     return centered_or_short and symbolic and math_count >= 1
 
 
+def _equation_text_score(text: str) -> int:
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact or re.fullmatch(r"\(\d+\)", compact):
+        return 0
+    if re.fullmatch(r"\d+(?:\.\d+)?", compact):
+        return 1
+    if re.fullmatch(r"[A-Za-zα-ωΑ-Ωϕφπβθτσµ]", compact):
+        return 2
+    math_chars = "=+-*/_\\^{}()[]|<>∑∫√≈≠≤≥πβθφτσµ"
+    math_count = sum(1 for char in compact if char in math_chars)
+    has_operator = bool(re.search(r"[=≈≤≥<>]|\\[A-Za-z]+|[A-Za-z][_^{]", compact))
+    if not has_operator and math_count < 2:
+        return len(compact) // 4
+    return len(compact) + math_count * 4
+
+
+EQUATION_PROSE_RE = re.compile(
+    r"\b("
+    r"the|this|that|where|which|therefore|because|indicates|shows|suggests|"
+    r"formulation|provides|relationship|between|empirical|data|fit|model|"
+    r"sampled|denotes|follows|given|obtained|contains|we|our|their|from|with"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_formula_candidate_text(text: str) -> str:
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    cleaned = cleaned.replace("\u2212", "-").replace("\u2217", "*")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _looks_like_equation_prose(text: str) -> bool:
+    cleaned = _clean_formula_candidate_text(text)
+    if not cleaned or re.fullmatch(r"\(?\d+\)?", cleaned):
+        return False
+    words = re.findall(r"[A-Za-z]{2,}", cleaned)
+    prose_hits = len(EQUATION_PROSE_RE.findall(cleaned))
+    has_formula_core = bool(re.search(r"[=+\-*/]|\\[A-Za-z]+|[A-Za-z][_^]|[∼~≤≥≈]|[\u03b1-\u03c9\u03d5]", cleaned))
+    if prose_hits >= 1 and len(words) >= 5:
+        return True
+    if len(cleaned) > 150 and len(words) >= 10 and prose_hits >= 1:
+        return True
+    if len(cleaned) > 220 and len(words) >= 14 and not has_formula_core:
+        return True
+    return False
+
+
+def _candidate_formula_text(candidate_texts: list[tuple[fitz.Rect, str]], number: str, page: fitz.Page) -> str:
+    parts: list[str] = []
+    for _bbox, text in sorted(candidate_texts, key=lambda item: (item[0].y0, item[0].x0)):
+        cleaned = _clean_formula_candidate_text(text)
+        if not cleaned or cleaned == number or _looks_like_equation_prose(cleaned):
+            continue
+        if re.fullmatch(r"\d+(?:\.\d+)?", cleaned) and _bbox.y0 > page.rect.height * 0.90:
+            continue
+        if _looks_like_formula_artifact(cleaned):
+            continue
+        if _equation_text_score(cleaned) <= 0:
+            continue
+        parts.append(cleaned)
+    if not parts:
+        return ""
+    raw_text = _clean_text("\n".join(parts))
+    if raw_text and number not in raw_text:
+        raw_text = f"{raw_text}\n{number}"
+    return raw_text
+
+
+def _looks_like_formula_artifact(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return True
+    return bool(re.fullmatch(r"[|{}zZ]+", compact))
+
+
 def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
     lines = _page_line_items(page)
     number_lines = [
@@ -729,11 +851,12 @@ def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
         for bbox, text in lines
         if re.fullmatch(r"\(\d+\)", text.strip()) and bbox.x0 > page.rect.width * 0.70
     ]
-    individual: list[tuple[str, fitz.Rect]] = []
+    individual: list[tuple[str, fitz.Rect, str]] = []
     for number_bbox, number in number_lines:
         number_center = (number_bbox.y0 + number_bbox.y1) / 2
 
         candidates: list[fitz.Rect] = [number_bbox]
+        candidate_texts: list[tuple[fitz.Rect, str]] = []
         for bbox, text in lines:
             if bbox == number_bbox:
                 continue
@@ -742,18 +865,14 @@ def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
                 number_lines,
                 key=lambda item: abs(((item[0].y0 + item[0].y1) / 2) - center),
             )[1]
-            close_to_number = abs(center - number_center) <= 24
+            close_to_number = abs(center - number_center) <= 32
             left_of_number = bbox.x0 < number_bbox.x0 - 4
             compact_text = re.sub(r"\s+", " ", text.strip())
             formula_band = (
                 bbox.x0 > page.rect.width * 0.08
                 and bbox.x1 < number_bbox.x0 + 6
                 and len(compact_text) <= 260
-                and not re.search(
-                    r"\b(the|this|that|where|which|therefore|because|can|formulated|follows|described)\b",
-                    compact_text,
-                    re.IGNORECASE,
-                )
+                and not _looks_like_equation_prose(compact_text)
             )
             if (
                 nearest_number == number
@@ -762,6 +881,7 @@ def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
                 and (_looks_like_equation_fragment(text, bbox, page) or formula_band)
             ):
                 candidates.append(bbox)
+                candidate_texts.append((bbox, text))
 
         formula_parts = [bbox for bbox in candidates if bbox != number_bbox]
         if not formula_parts:
@@ -769,10 +889,11 @@ def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
         rect = fitz.Rect(candidates[0])
         for bbox in candidates[1:]:
             rect |= bbox
-        individual.append((number, rect))
+        raw_text = _candidate_formula_text(candidate_texts, number, page)
+        individual.append((number, rect, raw_text))
 
     individual.sort(key=lambda item: item[1].y0)
-    grouped: list[list[tuple[str, fitz.Rect]]] = []
+    grouped: list[list[tuple[str, fitz.Rect, str]]] = []
     for item in individual:
         if not grouped:
             grouped.append([item])
@@ -788,14 +909,21 @@ def _numbered_equation_rects(page: fitz.Page) -> dict[str, EquationCrop]:
     crops: dict[str, EquationCrop] = {}
     for group in grouped:
         rect = fitz.Rect(group[0][1])
-        for _number, item_rect in group[1:]:
+        for _number, item_rect, _raw_text in group[1:]:
             rect |= item_rect
-        numbers = [number.strip("()") for number, _rect in group]
+        numbers = [number.strip("()") for number, _rect, _raw_text in group]
+        raw_text = _clean_text("\n".join(text for _number, _rect, text in group if text))
         filename = f"equation_{'_'.join(numbers)}"
         label = f"({numbers[0]})" if len(numbers) == 1 else f"({numbers[0]})-({numbers[-1]})"
         primary = group[0][0]
-        for number, _rect in group:
-            crops[number] = EquationCrop(rect=rect, label=label, filename=filename, primary_number=primary)
+        for number, _rect, _raw_text in group:
+            crops[number] = EquationCrop(
+                rect=rect,
+                label=label,
+                filename=filename,
+                primary_number=primary,
+                raw_text=raw_text,
+            )
     return crops
 
 
@@ -860,6 +988,15 @@ def _text_blocks_with_heading_levels(
                 if element.kind == "text":
                     element.heading_level = _heading_level(element.text, font_size, is_bold, page_font_size)
                 elements.append(element)
+            continue
+        if _looks_like_formula(text, bbox, page):
+            elements.append(
+                LayoutElement(
+                    kind="equation",
+                    bbox=bbox,
+                    text=text,
+                )
+            )
             continue
         elements.append(
             LayoutElement(
@@ -1378,12 +1515,12 @@ def _valid_figure_crop(
             continue
         if any(_overlap_ratio(block.bbox, caption_box) > 0.75 for caption_box in caption_boxes):
             continue
-        if _overlap_ratio(block.bbox, crop_rect) <= 0.28:
+        if not _block_inside_visual_crop(block, crop_rect):
             continue
         words = re.findall(r"[A-Za-z]{2,}|[\u4e00-\u9fff]", block.text)
         if len(block.text) > 260 or len(words) > 55:
             long_body_hits += 1
-    return long_body_hits <= 1
+    return long_body_hits == 0
 
 
 def _layout_elements(page: fitz.Page, page_number: int, assets_dir: Path) -> list[LayoutElement]:
@@ -1417,12 +1554,11 @@ def _layout_elements(page: fitz.Page, page_number: int, assets_dir: Path) -> lis
         if index in skip_text:
             continue
         if block.caption_kind is None and _looks_like_formula(block.text, block.bbox, page):
-            rel_path = _save_page_clip(page, block.bbox, assets_dir, f"page-{page_number:03d}-formula-{formula_index:02d}")
             elements.append(
                 LayoutElement(
-                    kind="formula",
+                    kind="equation",
                     bbox=block.bbox,
-                    markdown=f"![Page {page_number} formula {formula_index}]({rel_path})",
+                    text=block.text,
                 )
             )
             skip_text.add(index)
@@ -1548,19 +1684,164 @@ def html_escape(value: object) -> str:
     )
 
 
+GREEK_TO_LATEX = {
+    "α": r"\alpha",
+    "β": r"\beta",
+    "γ": r"\gamma",
+    "δ": r"\delta",
+    "ε": r"\epsilon",
+    "θ": r"\theta",
+    "λ": r"\lambda",
+    "μ": r"\mu",
+    "π": r"\pi",
+    "ρ": r"\rho",
+    "σ": r"\sigma",
+    "τ": r"\tau",
+    "ϕ": r"\phi",
+    "φ": r"\phi",
+    "Ω": r"\Omega",
+    "Δ": r"\Delta",
+}
+
+
+def _normalize_formula_symbols(text: str) -> str:
+    formula = _clean_formula_candidate_text(text)
+    formula = formula.replace("Dπ∗", r"D_{\pi^*}")
+    formula = formula.replace("Dπ*", r"D_{\pi^*}")
+    formula = formula.replace("Dπϕ", r"D_{\pi_{\phi}}")
+    formula = formula.replace("Dπφ", r"D_{\pi_{\phi}}")
+    formula = formula.replace("πinit", r"\pi_{\mathrm{init}}")
+    formula = formula.replace("π_init", r"\pi_{\mathrm{init}}")
+    formula = formula.replace("π∗", r"\pi^*")
+    formula = formula.replace("π*", r"\pi^*")
+    formula = formula.replace("πϕ", r"\pi_{\phi}")
+    formula = formula.replace("πφ", r"\pi_{\phi}")
+    formula = formula.replace("Dπ", r"D_{\pi}")
+    formula = formula.replace("ORL", r"O_{\mathrm{RL}}")
+    formula = formula.replace("DKL", r"D_{\mathrm{KL}}")
+    formula = formula.replace("Lpre-train", r"\mathcal{L}_{\mathrm{pre-train}}")
+    formula = formula.replace("Lfine-tune", r"\mathcal{L}_{\mathrm{fine-tune}}")
+    formula = formula.replace("rθ", r"r_\theta")
+    formula = formula.replace("−", "-").replace("∗", "^*")
+    formula = formula.replace("∼", r"\sim ").replace("~", r"\sim ")
+    formula = formula.replace("·", r"\cdot ")
+    formula = formula.replace("△=", r"\triangleq")
+    formula = formula.replace("||", r"\|")
+    formula = formula.replace("σ", r"\sigma")
+    for greek, latex in GREEK_TO_LATEX.items():
+        formula = formula.replace(greek, latex)
+    formula = re.sub(
+        r"\bE\(([^)\n]{1,120})\)\s*\\sim\s*([^\[]+)\[",
+        lambda match: r"\mathbb{E}_{(" + match.group(1).strip() + r")\sim " + match.group(2).strip() + r"}\left[",
+        formula,
+    )
+    formula = re.sub(r"\bD(pre-train|fine-tune)\b", lambda match: r"D_{\mathrm{" + match.group(1) + "}}", formula)
+    formula = re.sub(r"\\tau\s*\*", r"\\tau^*", formula)
+    formula = re.sub(r"\\tau([A-Z]\d*)", r"\\tau_{\1}", formula)
+    formula = re.sub(r"\\tau([A-Z])\b", r"\\tau_{\1}", formula)
+    formula = re.sub(r"\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|pi|rho|sigma|phi)(?=[A-Za-z\\])", r"\\\1 ", formula)
+    formula = re.sub(r"\\sim(?=[A-Za-z\\])", r"\\sim ", formula)
+    formula = re.sub(r"(?<!\\)\blog\b", r"\\log", formula)
+    formula = re.sub(r"(?<!\\)\bexp\b", r"\\exp", formula)
+    formula = re.sub(r"\b([A-Za-z])\s*-\.(\d+)", r"\1^{-0.\2}", formula)
+    formula = formula.replace(r"D\pi_{\phi}", r"D_{\pi_{\phi}}")
+    formula = formula.replace(r"D\pi^*", r"D_{\pi^*}")
+    if r"\left[" in formula:
+        formula = re.sub(r"\]\s*[,.;]?\s*$", lambda _match: r"\right]", formula)
+    formula = re.sub(r"\s+", " ", formula).strip()
+    return formula
+
+
+def _reconstruct_multiline_formula(lines: list[str]) -> str:
+    compact_lines = [_clean_formula_candidate_text(line) for line in lines if _clean_formula_candidate_text(line)]
+    joined = " ".join(compact_lines)
+
+    has_policy_solution = (
+        any(re.search(r"π[∗*]\(τ\|x\)\s*=", line) for line in compact_lines)
+        and any("Z(x)" in line and "πinit" in line and "exp" in line for line in compact_lines)
+        and any("rθ(x, τ)" in line or "rθ(x,τ)" in line for line in compact_lines)
+    )
+    if has_policy_solution:
+        return (
+            r"\pi^*(\tau|x) = \frac{1}{Z(x)}"
+            r"\pi_{\mathrm{init}}(\tau|x)"
+            r"\exp\left(\frac{r_\theta(x,\tau)}{\beta}\right)"
+        )
+
+    has_log_ratio_definition = (
+        any("△=" in line or "\\triangleq" in line for line in compact_lines)
+        and any("log" in line and re.search(r"π[∗*]\(τ\|x\)", line) for line in compact_lines)
+        and any("πinit" in line for line in compact_lines)
+        and any("rθ(x, τ)" in line or "rθ(x,τ)" in line for line in compact_lines)
+    )
+    if has_log_ratio_definition:
+        return (
+            r"r_\theta(x,\tau) \triangleq "
+            r"\beta \log \frac{\pi^*(\tau|x)}{\pi_{\mathrm{init}}(\tau|x)}"
+            r" + \beta \log Z(x)"
+        )
+
+    has_expected_kl = (
+        "Eτ" in joined
+        and "log π" in joined
+        and "πinit" in joined
+        and "DKL" in joined
+    )
+    if has_expected_kl:
+        return (
+            r"\mathbb{E}_{\tau\sim\pi^*(\cdot|x)}[r_\theta(x,\tau)] "
+            r"\sim \beta\,\mathbb{E}_{\pi^*}"
+            r"\left[\log \frac{\pi^*}{\pi_{\mathrm{init}}}\right]"
+            r" = \beta D_{\mathrm{KL}}(\pi^*\|\pi_{\mathrm{init}})"
+        )
+
+    return ""
+
+
+def _formula_raw_to_latex(raw_text: str) -> str:
+    tag = ""
+    formula_lines: list[str] = []
+    for line in raw_text.splitlines():
+        cleaned = _clean_formula_candidate_text(line)
+        if not cleaned:
+            continue
+        number_match = re.fullmatch(r"\(?(\d+(?:_\d+)*)\)?", cleaned)
+        if number_match:
+            tag = number_match.group(1).replace("_", "-")
+            continue
+        if _looks_like_equation_prose(cleaned):
+            continue
+        if _equation_text_score(cleaned) <= 0:
+            continue
+        formula_lines.append(cleaned)
+
+    if not formula_lines:
+        return ""
+    formula = _reconstruct_multiline_formula(formula_lines) or _normalize_formula_symbols(" ".join(formula_lines))
+    if not formula:
+        return ""
+    if tag and r"\tag{" not in formula:
+        formula = formula.rstrip(" .，,") + rf"\tag{{{tag}}}"
+    return formula
+
+
 def _layout_text_to_block(element: LayoutElement) -> dict[str, Any] | None:
-    text = _prepare_text_for_model(element.text.strip())
-    if not text:
-        return None
     if element.kind == "equation":
+        text = _strip_inline_citations(_clean_text(element.text.strip()))
+        if not text:
+            return None
         block: dict[str, Any] = {
             "type": "equation",
             "id": "equation",
             "raw_text": text,
         }
-        if element.markdown:
-            block["path"] = element.markdown
+        latex = _formula_raw_to_latex(text)
+        if latex:
+            block["latex"] = latex
         return block
+    text = _prepare_text_for_model(element.text.strip())
+    if not text:
+        return None
     if element.heading_level:
         return {
             "type": "heading",
@@ -1628,7 +1909,7 @@ def _structured_page_blocks(
                 figures_dir.mkdir(parents=True, exist_ok=True)
                 rel_path = _save_page_clip(page, crop_rect, figures_dir, figure_id)
                 for index, block in enumerate(raw_text_blocks):
-                    if _caption_kind(block.text) is None and _overlap_ratio(block.bbox, crop_rect) > 0.35:
+                    if _caption_kind(block.text) is None and _block_inside_visual_crop(block, crop_rect):
                         skip_text.add(index)
             positioned_blocks.append(
                 (

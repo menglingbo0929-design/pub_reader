@@ -4,7 +4,7 @@ import unittest
 from pub_reader.config import AppConfig
 from pub_reader.llm import DeepSeekClient, FieldContext
 from pub_reader.markdown_postprocess import sanitize_markdown
-from pub_reader.pdf_pipeline import _split_paper_block_chunks
+from pub_reader.pdf_pipeline import _formula_raw_to_latex, _split_paper_block_chunks
 
 
 class FakeDeepSeekClient(DeepSeekClient):
@@ -53,7 +53,7 @@ Time：2.1h
         self.assertNotIn("[SZY+24]", output)
         self.assertNotIn("[12; 31; 45]", output)
         self.assertNotIn("figures/equation_1.png", output)
-        self.assertIn('<pre><code class="language-latex">E = mc^2</code></pre>', output)
+        self.assertIn("$$\nE = mc^2\n$$", output)
         self.assertIn("| Model | BLEU |", output)
         self.assertIn("![图 1：Figure 1: Model](figures/figure_1.png)", output)
 
@@ -66,6 +66,68 @@ Time：2.1h
             parsed = json.loads(chunk)
             self.assertIsInstance(parsed, list)
             self.assertLessEqual(len(chunk), 2200)
+
+    def test_raw_equation_block_does_not_overwrite_model_latex(self) -> None:
+        blocks = [
+            {
+                "type": "equation",
+                "id": "equation_2",
+                "raw_text": "O RL(pi) = E ... (2)",
+            }
+        ]
+        raw = "$$\nO_{\\mathrm{RL}}(\\pi)=\\mathbb{E}_{(x,\\tau)\\sim D_\\pi}[r_\\theta(x,\\tau)]\n$$"
+
+        output = sanitize_markdown(raw, blocks, normalize_inline_math=True)
+
+        self.assertIn(r"O_{\mathrm{RL}}(\pi)", output)
+        self.assertNotIn("O RL(pi)", output)
+
+    def test_raw_numbered_formula_is_cleaned_into_latex(self) -> None:
+        raw = (
+            "ORL(π) = E(x,τ)∼Dπ [rθ(x, τ) -βDKL(π(τ|x)||πinit(τ|x))].\n"
+            "The high R value of the fit indicates prose and must not enter the formula.\n"
+            "(2)"
+        )
+
+        latex = _formula_raw_to_latex(raw)
+
+        self.assertIn(r"O_{\mathrm{RL}}(\pi)", latex)
+        self.assertIn(r"\mathbb{E}_{(x,\tau)\sim D_{\pi}}\left[", latex)
+        self.assertIn(r"\beta D_{\mathrm{KL}}", latex)
+        self.assertIn(r"\pi_{\mathrm{init}}", latex)
+        self.assertIn(r"\tag{2}", latex)
+        self.assertNotIn("high R value", latex)
+
+    def test_multiline_pdf_formula_is_reconstructed(self) -> None:
+        raw = "rθ(x, τ)\n1\nπ*(τ|x) =\nZ(x)πinit(τ|x) exp\nβ\n(3)"
+
+        latex = _formula_raw_to_latex(raw)
+
+        self.assertIn(r"\frac{1}{Z(x)}", latex)
+        self.assertIn(r"\exp\left(\frac{r_\theta(x,\tau)}{\beta}\right)", latex)
+        self.assertIn(r"\tag{3}", latex)
+
+    def test_power_law_exponent_is_not_flattened(self) -> None:
+        latex = _formula_raw_to_latex("L = 0.9 · N -.0425.\n(9)")
+
+        self.assertIn(r"N^{-0.0425}", latex)
+        self.assertIn(r"\tag{9}", latex)
+
+    def test_sanitize_wraps_bare_inline_latex_and_drops_failure_text(self) -> None:
+        raw = r"""
+令 \phi 参数化策略 \pi_{\phi}，提示分布为 D_x。
+
+$$
+公式未能可靠识别
+$$
+"""
+
+        output = sanitize_markdown(raw, [], normalize_inline_math=True)
+
+        self.assertIn(r"\(\phi\)", output)
+        self.assertIn(r"\(\pi_{\phi}\)", output)
+        self.assertIn(r"\(D_x\)", output)
+        self.assertNotIn("公式未能可靠识别", output)
 
     def test_translation_retries_suspiciously_short_large_chunks(self) -> None:
         client = FakeDeepSeekClient()
