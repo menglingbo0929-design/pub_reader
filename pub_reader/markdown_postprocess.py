@@ -315,6 +315,10 @@ def _strip_reference_citations(markdown: str) -> str:
 
 def _plain_inline_math(math: str) -> str:
     text = math.strip()
+    if text.startswith(r"\(") and text.endswith(r"\)"):
+        text = text[2:-2].strip()
+    if text.startswith("$") and text.endswith("$") and not text.startswith("$$"):
+        text = text[1:-1].strip()
     text = re.sub(r"\\(?:text|mathrm|operatorname)\{([^{}]+)\}", r"\1", text)
     text = re.sub(r"\\mathbb\{([^{}]+)\}", r"\1", text)
     text = re.sub(r"\\mathcal\{([^{}]+)\}", r"\1", text)
@@ -327,20 +331,44 @@ def _plain_inline_math(math: str) -> str:
         r"\approx": "≈",
         r"\sim": "∼",
         r"\pi": "π",
+        r"\tau": "τ",
         r"\theta": "θ",
         r"\lambda": "λ",
         r"\alpha": "α",
         r"\beta": "β",
         r"\gamma": "γ",
+        r"\delta": "δ",
         r"\sigma": "σ",
+        r"\phi": "φ",
+        r"\rho": "ρ",
+        r"\epsilon": "ε",
+        r"\Delta": "Δ",
+        r"\top": "ᵀ",
     }
     for source, target in replacements.items():
         text = text.replace(source, target)
+    text = re.sub(r"_\{([^{}]+)\}", r"₍\1₎", text)
+    text = re.sub(r"\^\{([^{}]+)\}", r"^(\1)", text)
+    text = re.sub(r"_([A-Za-z0-9]+)", r"₍\1₎", text)
+    text = re.sub(r"\^([A-Za-z0-9+\-*]+)", r"^(\1)", text)
     text = text.replace("\\_", "_")
     text = re.sub(r"\\([A-Za-z]+)", r"\1", text)
     text = text.replace("{", "").replace("}", "")
     text = text.replace("^+", "⁺").replace("^-", "⁻")
     return text.strip()
+
+
+def inline_math_to_preview_text(math: str) -> str:
+    """Convert inline LaTeX into plain math text for preview widgets without MathJax."""
+    return _plain_inline_math(math)
+
+
+def display_math_to_preview_text(formula: str) -> str:
+    """Convert display LaTeX into a readable formula line for local preview."""
+    text = _plain_display_formula(formula)
+    if text:
+        return text
+    return _strip_math_wrapper(formula)
 
 
 UNRELIABLE_FORMULA_RE = re.compile(

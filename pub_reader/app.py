@@ -58,7 +58,11 @@ from pub_reader.cancel import GenerationCancelled
 from pub_reader.config import load_config
 from pub_reader.library import LibraryFolder, LibraryManager, PaperRecord
 from pub_reader.llm import DeepSeekClient, DeepSeekError
-from pub_reader.markdown_postprocess import prepare_markdown_for_preview
+from pub_reader.markdown_postprocess import (
+    display_math_to_preview_text,
+    inline_math_to_preview_text,
+    prepare_markdown_for_preview,
+)
 from pub_reader.pdf_pipeline import (
     PaperOutputs,
     _prepare_paper_workspace,
@@ -2095,6 +2099,30 @@ class MainWindow(QMainWindow):
         def safe_math(text: str) -> str:
             return re.sub(r"</?(?:script|style)[^>]*>", "", text, flags=re.IGNORECASE).strip()
 
+        def render_inline_formula(text: str) -> str:
+            readable = inline_math_to_preview_text(safe_math(text))
+            return f"<span class=\"formula-inline\">{html.escape(readable)}</span>"
+
+        def render_display_formula(text: str) -> str:
+            readable = display_math_to_preview_text(safe_math(text))
+            if not readable:
+                return ""
+            return (
+                "<div class=\"formula-block\">"
+                f"<span class=\"formula-line\">{html.escape(readable)}</span>"
+                "</div>"
+            )
+
+        def render_existing_formula_block(raw_html: str) -> str:
+            latex_match = re.search(r"data-latex=\"([^\"]+)\"", raw_html, flags=re.IGNORECASE)
+            if latex_match:
+                return render_display_formula(html.unescape(latex_match.group(1)))
+            display_match = re.search(r"\$\$(.*?)\$\$", raw_html, flags=re.DOTALL)
+            if display_match:
+                return render_display_formula(display_match.group(1))
+            text = re.sub(r"<[^>]+>", " ", raw_html)
+            return render_display_formula(html.unescape(text))
+
         def inline(text: str) -> str:
             pieces = inline_math_re.split(text)
             rendered: list[str] = []
@@ -2102,7 +2130,7 @@ class MainWindow(QMainWindow):
                 if not piece:
                     continue
                 if inline_math_re.fullmatch(piece):
-                    rendered.append(safe_math(piece))
+                    rendered.append(render_inline_formula(piece))
                     continue
                 escaped = html.escape(piece)
                 escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
@@ -2163,7 +2191,7 @@ class MainWindow(QMainWindow):
                         index += 1
                         break
                     index += 1
-                html_parts.append("\n".join(raw))
+                html_parts.append(render_existing_formula_block("\n".join(raw)))
                 continue
             if stripped == "$$":
                 flush_paragraph()
@@ -2177,7 +2205,7 @@ class MainWindow(QMainWindow):
                     index += 1
                 formula = safe_math("\n".join(formula_lines))
                 if formula:
-                    html_parts.append(f"<div class=\"formula-block\">$$\n{formula}\n$$</div>")
+                    html_parts.append(render_display_formula(formula))
                 continue
             if stripped.startswith(r"\["):
                 flush_paragraph()
@@ -2193,7 +2221,7 @@ class MainWindow(QMainWindow):
                     index += 1
                 formula = safe_math("\n".join(part for part in formula_lines))
                 if formula:
-                    html_parts.append(f"<div class=\"formula-block\">$$\n{formula}\n$$</div>")
+                    html_parts.append(render_display_formula(formula))
                 continue
             image = re.match(r"!\[(?P<alt>[^\]]*)\]\((?P<src>[^)]+)\)", stripped)
             if image:
@@ -2275,6 +2303,10 @@ class MainWindow(QMainWindow):
                 text-align: center;
                 overflow-x: auto;
             }
+            .formula-inline {
+                font-family: "Cambria Math", "Times New Roman", serif;
+                white-space: nowrap;
+            }
             .formula-image {
                 max-width: 100%;
                 background: #FFFFFF;
@@ -2342,19 +2374,6 @@ class MainWindow(QMainWindow):
             + preview_css
             + """
                 </style>
-                <script>
-                  window.MathJax = {
-                    tex: {
-                      inlineMath: [['\\\\(', '\\\\)'], ['$', '$']],
-                      displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
-                      processEscapes: true,
-                      processEnvironments: true,
-                      packages: {'[+]': ['ams']}
-                    },
-                    svg: { fontCache: 'global' }
-                  };
-                </script>
-                <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
               </head>
               <body>
             """
