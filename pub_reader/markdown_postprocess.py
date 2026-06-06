@@ -582,6 +582,117 @@ def _replace_structured_table_markup(markdown: str, paper_blocks: Sequence[Paper
     return table_markup.sub(repl, markdown, count=len(table_blocks))
 
 
+def _table_caption_matches_line(block: PaperBlock, line: str) -> bool:
+    number = _block_number(block)
+    caption = _block_text(block, "caption") or _block_text(block, "title")
+    if number and re.search(rf"(?:Table|表)\s*{re.escape(number)}\b", line, flags=re.IGNORECASE):
+        return True
+    compact_line = re.sub(r"\s+", "", line).casefold()
+    compact_caption = re.sub(r"\s+", "", caption).casefold()
+    return len(compact_caption) >= 12 and compact_caption[:32] in compact_line
+
+
+def _numeric_token_count(text: str) -> int:
+    tokens = re.split(r"\s+", text.strip())
+    return sum(
+        1
+        for token in tokens
+        if re.fullmatch(r"[+\-]?\d+(?:\.\d+)?%?(?:[kKmMbBhHsS])?", token.strip("(),.;:"))
+    )
+
+
+def _looks_like_flat_table_line(line: str) -> bool:
+    text = line.strip()
+    if not text:
+        return False
+    if text.startswith(("#", "|", "<", "!", "$$")):
+        return False
+    if re.search(r"[。！？!?]", text) and _numeric_token_count(text) < 4:
+        return False
+    tokens = [token for token in re.split(r"\s+", text) if token]
+    if _numeric_token_count(text) >= 3:
+        return True
+    if len(tokens) >= 6 and _numeric_token_count(text) >= 1:
+        return True
+    if len(tokens) >= 8 and all(len(token) <= 24 for token in tokens):
+        return True
+    return False
+
+
+def _replace_split_table_runs_with_structured_tables(
+    markdown: str,
+    paper_blocks: Sequence[PaperBlock],
+) -> str:
+    table_blocks = [
+        block for block in paper_blocks
+        if _block_text(block, "type") == "table" and _has_structured_table_data(block)
+    ]
+    if not table_blocks:
+        return markdown
+
+    lines = markdown.splitlines()
+    output: list[str] = []
+    used: set[int] = set()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match_index = next(
+            (
+                table_index
+                for table_index, block in enumerate(table_blocks)
+                if table_index not in used and _table_caption_matches_line(block, line)
+            ),
+            None,
+        )
+        if match_index is None:
+            output.append(line)
+            index += 1
+            continue
+
+        end = index + 1
+        consumed_table_lines = 0
+        blank_budget = 1
+        while end < len(lines):
+            candidate = lines[end]
+            stripped = candidate.strip()
+            if not stripped and blank_budget > 0:
+                blank_budget -= 1
+                end += 1
+                continue
+            if not stripped:
+                break
+            if stripped.startswith("#"):
+                heading_text = stripped.lstrip("#").strip()
+                if re.match(r"\d+(?:\.\d+)*\s+", heading_text):
+                    break
+                if consumed_table_lines or _looks_like_flat_table_line(heading_text) or len(heading_text) <= 120:
+                    consumed_table_lines += 1
+                    end += 1
+                    continue
+                break
+            if stripped.startswith(("![", "$$", "<table", "</table")):
+                break
+            if _looks_like_flat_table_line(candidate):
+                consumed_table_lines += 1
+                end += 1
+                continue
+            if consumed_table_lines < 2 and len(stripped) <= 90 and not re.search(r"[。！？!?]", stripped):
+                consumed_table_lines += 1
+                end += 1
+                continue
+            break
+
+        rendered = render_table_block_to_markdown(table_blocks[match_index])
+        if output and output[-1].strip():
+            output.append("")
+        output.extend(rendered.splitlines())
+        output.append("")
+        used.add(match_index)
+        index = end
+
+    return "\n".join(output)
+
+
 def _looks_like_split_table(markdown: str) -> bool:
     lines = [line.strip() for line in markdown.splitlines()]
     run = 0
@@ -686,6 +797,7 @@ def sanitize_markdown(
         text = _normalize_inline_math_for_preview(text)
     if ensure_all_equations:
         text = _insert_missing_equations_into_summary(text, paper_blocks)
+    text = _replace_split_table_runs_with_structured_tables(text, paper_blocks)
     text = _replace_structured_table_markup(text, paper_blocks)
     text = _append_missing_structures(text, paper_blocks)
     text = _replace_equation_image_links(text, paper_blocks)
@@ -696,5 +808,6 @@ def sanitize_markdown(
     text = _strip_reference_citations(text)
     if normalize_inline_math:
         text = _normalize_inline_math_for_preview(text)
+    text = _replace_split_table_runs_with_structured_tables(text, paper_blocks)
     text = _remove_unreliable_formula_placeholders(text)
     return _normalize_spacing(text)
