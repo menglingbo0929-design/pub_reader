@@ -431,11 +431,8 @@ def _normalize_inline_math_for_preview(markdown: str) -> str:
 
 
 def prepare_markdown_for_preview(markdown: str) -> str:
-    """Apply the same math cleanup before rendering Markdown inside the app."""
-    text = _remove_unreliable_formula_placeholders(markdown)
-    text = _ensure_display_math_pairs(text)
-    text = _normalize_inline_math_for_preview(text)
-    return _remove_unreliable_formula_placeholders(text)
+    """Keep preview cleanup conservative so the renderer sees the original TeX."""
+    return _remove_unreliable_formula_placeholders(markdown)
 
 
 def _replace_equation_image_links(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:

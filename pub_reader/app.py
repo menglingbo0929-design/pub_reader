@@ -58,11 +58,7 @@ from pub_reader.cancel import GenerationCancelled
 from pub_reader.config import load_config
 from pub_reader.library import LibraryFolder, LibraryManager, PaperRecord
 from pub_reader.llm import DeepSeekClient, DeepSeekError
-from pub_reader.markdown_postprocess import (
-    display_math_to_preview_text,
-    inline_math_to_preview_text,
-    prepare_markdown_for_preview,
-)
+from pub_reader.markdown_postprocess import prepare_markdown_for_preview
 from pub_reader.pdf_pipeline import (
     PaperOutputs,
     _prepare_paper_workspace,
@@ -2094,22 +2090,24 @@ class MainWindow(QMainWindow):
 
     def _preview_markdown_to_html(self, markdown: str) -> str:
         """Render generated Markdown into HTML while preserving raw table blocks."""
-        inline_math_re = re.compile(r"(\\\(.*?\\\)|\$(?!\$).*?(?<!\\)\$)")
+        inline_math_re = re.compile(r"(\\\(.*?\\\)|\$(?!\$).*?(?<!\\)\$)", re.DOTALL)
 
         def safe_math(text: str) -> str:
             return re.sub(r"</?(?:script|style)[^>]*>", "", text, flags=re.IGNORECASE).strip()
 
         def render_inline_formula(text: str) -> str:
-            readable = inline_math_to_preview_text(safe_math(text))
-            return f"<span class=\"formula-inline\">{html.escape(readable)}</span>"
+            formula = safe_math(text)
+            return f"<span class=\"formula-inline\">{html.escape(formula)}</span>"
 
         def render_display_formula(text: str) -> str:
-            readable = display_math_to_preview_text(safe_math(text))
-            if not readable:
+            formula = safe_math(text)
+            if not formula:
                 return ""
             return (
                 "<div class=\"formula-block\">"
-                f"<span class=\"formula-line\">{html.escape(readable)}</span>"
+                "$$\n"
+                f"{html.escape(formula)}"
+                "\n$$"
                 "</div>"
             )
 
@@ -2138,8 +2136,57 @@ class MainWindow(QMainWindow):
                 rendered.append(escaped)
             return "".join(rendered)
 
+        def split_table_row(line: str) -> list[str]:
+            row = line.strip()
+            if row.startswith("|"):
+                row = row[1:]
+            if row.endswith("|"):
+                row = row[:-1]
+            cells: list[str] = []
+            current: list[str] = []
+            in_dollar_math = False
+            in_paren_math = False
+            index = 0
+            while index < len(row):
+                if row.startswith(r"\(", index):
+                    in_paren_math = True
+                    current.append(r"\(")
+                    index += 2
+                    continue
+                if in_paren_math and row.startswith(r"\)", index):
+                    in_paren_math = False
+                    current.append(r"\)")
+                    index += 2
+                    continue
+                char = row[index]
+                if char == "\\" and index + 1 < len(row) and row[index + 1] == "|":
+                    current.append("|")
+                    index += 2
+                    continue
+                if char == "$":
+                    in_dollar_math = not in_dollar_math
+                    current.append(char)
+                    index += 1
+                    continue
+                if char == "|" and not in_dollar_math and not in_paren_math:
+                    cells.append("".join(current).strip())
+                    current.clear()
+                    index += 1
+                    continue
+                current.append(char)
+                index += 1
+            cells.append("".join(current).strip())
+            return cells
+
+        def fit_table_row(row: list[str], width: int) -> list[str]:
+            if len(row) < width:
+                return row + [""] * (width - len(row))
+            if len(row) > width and width > 0:
+                return row[: width - 1] + [" | ".join(row[width - 1 :])]
+            return row
+
         def render_pipe_table(lines: list[str]) -> str:
-            rows = [[cell.strip() for cell in line.strip().strip("|").split("|")] for line in lines]
+            rows = [split_table_row(line) for line in lines]
             if len(rows) < 2:
                 return "<p>" + "<br>".join(inline(line) for line in lines) + "</p>"
             header = rows[0]
@@ -2148,6 +2195,7 @@ class MainWindow(QMainWindow):
                 lines[1],
             )
             body_rows = rows[2:] if has_separator else rows[1:]
+            body_rows = [fit_table_row(row, len(header)) for row in body_rows]
             head_html = "".join(f"<th>{inline(cell)}</th>" for cell in header)
             body_html = "\n".join(
                 "<tr>" + "".join(f"<td>{inline(cell)}</td>" for cell in row) + "</tr>"
@@ -2223,12 +2271,22 @@ class MainWindow(QMainWindow):
                 if formula:
                     html_parts.append(render_display_formula(formula))
                 continue
-            image = re.match(r"!\[(?P<alt>[^\]]*)\]\((?P<src>[^)]+)\)", stripped)
+            image = re.match(r"!\[(?P<alt>[^\]]*)\]\((?P<src>[^)]*)\)", stripped)
             if image:
                 flush_paragraph()
                 alt = html.escape(image.group("alt"))
-                src = html.escape(image.group("src"))
-                html_parts.append(f"<figure><img src=\"{src}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>")
+                src = image.group("src").strip()
+                if src:
+                    html_parts.append(
+                        f"<figure><img src=\"{html.escape(src)}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>"
+                    )
+                else:
+                    html_parts.append(
+                        "<figure class=\"missing-figure\">"
+                        f"<figcaption>{alt}</figcaption>"
+                        "<p>图片未能从 PDF 中可靠提取。</p>"
+                        "</figure>"
+                    )
                 index += 1
                 continue
             heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
@@ -2296,15 +2354,14 @@ class MainWindow(QMainWindow):
             }
             .formula-block {
                 margin: 0.55em 0;
-                padding: 6px 10px;
-                border: 1px solid #E2E8F0;
-                border-radius: 6px;
+                padding: 8px 10px;
+                border: 0;
+                border-radius: 0;
                 background: #FFFFFF;
                 text-align: center;
                 overflow-x: auto;
             }
             .formula-inline {
-                font-family: "Cambria Math", "Times New Roman", serif;
                 white-space: nowrap;
             }
             .formula-image {
@@ -2358,6 +2415,15 @@ class MainWindow(QMainWindow):
                 margin-top: 0.08em;
                 line-height: 1.35;
             }
+            .missing-figure {
+                border: 1px dashed #CBD5E1;
+                border-radius: 8px;
+                padding: 10px 12px;
+            }
+            .missing-figure p {
+                color: #64748B;
+                margin: 0.25em 0 0 0;
+            }
             figure + p, figure + h1, figure + h2, figure + h3, figure + h4 {
                 margin-top: 0.35em;
             }
@@ -2369,6 +2435,19 @@ class MainWindow(QMainWindow):
             <html>
               <head>
                 <meta charset="utf-8">
+                <script>
+                  window.MathJax = {
+                    tex: {
+                      inlineMath: [['\\\\(', '\\\\)'], ['$', '$']],
+                      displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
+                      processEscapes: true,
+                      packages: {'[+]': ['ams']}
+                    },
+                    svg: {fontCache: 'none'},
+                    options: {skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']}
+                  };
+                </script>
+                <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
                 <style>
             """
             + preview_css
