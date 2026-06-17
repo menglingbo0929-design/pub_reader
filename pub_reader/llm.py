@@ -22,6 +22,34 @@ class DeepSeekError(RuntimeError):
     pass
 
 
+PROVIDER_CONFIGS: dict[str, dict[str, str]] = {
+    "deepseek": {
+        "display": "DeepSeek",
+        "kind": "openai",
+        "model": "deepseek-v4-pro",
+        "api_base_url": "https://api.deepseek.com/chat/completions",
+    },
+    "openai": {
+        "display": "OpenAI",
+        "kind": "openai",
+        "model": "gpt-4.1",
+        "api_base_url": "https://api.openai.com/v1/chat/completions",
+    },
+    "claude": {
+        "display": "Claude",
+        "kind": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "api_base_url": "https://api.anthropic.com/v1/messages",
+    },
+    "qwen": {
+        "display": "Qwen",
+        "kind": "openai",
+        "model": "qwen-plus",
+        "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    },
+}
+
+
 @dataclass
 class FieldContext:
     field: str
@@ -52,11 +80,29 @@ class FieldContext:
 
 
 class DeepSeekClient:
-    def __init__(self, api_key: str, config: AppConfig) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        config: AppConfig,
+        provider: str = "deepseek",
+        model_name: str | None = None,
+    ) -> None:
         self.api_key = api_key.strip()
         self.config = config
+        provider_key = (provider or "deepseek").strip().lower()
+        if provider_key not in PROVIDER_CONFIGS:
+            provider_key = "deepseek"
+        self.provider = provider_key
+        self.provider_config = PROVIDER_CONFIGS[provider_key]
+        self.provider_display = self.provider_config["display"]
+        self.provider_kind = self.provider_config["kind"]
+        self.api_base_url = self.provider_config["api_base_url"]
+        self.model_name = (model_name or self.provider_config["model"]).strip()
+        if provider_key == "deepseek":
+            self.api_base_url = config.api_base_url or self.api_base_url
+            self.model_name = model_name or config.model_name or self.model_name
         if not self.api_key:
-            raise DeepSeekError("DeepSeek API key 不能为空。")
+            raise DeepSeekError(f"{self.provider_display} API key 不能为空。")
 
     def complete(
         self,
@@ -64,9 +110,12 @@ class DeepSeekClient:
         temperature: float = 0.2,
         cancel_check: CancelCheck | None = None,
     ) -> str:
-        # DeepSeek uses an OpenAI-compatible chat completion payload.
+        if self.provider_kind == "anthropic":
+            return self._complete_anthropic(messages, temperature, cancel_check)
+
+        # DeepSeek, OpenAI, and Qwen all support OpenAI-compatible chat payloads.
         payload = {
-            "model": self.config.model_name,
+            "model": self.model_name,
             "messages": messages,
             "temperature": temperature,
         }
@@ -74,19 +123,84 @@ class DeepSeekClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        data = self._post_json_with_retries(self.api_base_url, headers, payload, cancel_check)
+        try:
+            return data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise DeepSeekError(f"{self.provider_display} 响应格式无法解析：{data}") from exc
+
+    def _complete_anthropic(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float,
+        cancel_check: CancelCheck | None,
+    ) -> str:
+        system_parts: list[str] = []
+        anthropic_messages: list[dict[str, str]] = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            if role == "system":
+                system_parts.append(content)
+            else:
+                anthropic_messages.append(
+                    {
+                        "role": "assistant" if role == "assistant" else "user",
+                        "content": content,
+                    }
+                )
+        if not anthropic_messages:
+            anthropic_messages.append({"role": "user", "content": ""})
+
+        payload: dict[str, object] = {
+            "model": self.model_name,
+            "messages": anthropic_messages,
+            "temperature": temperature,
+            "max_tokens": 8192,
+        }
+        if system_parts:
+            payload["system"] = "\n\n".join(system_parts)
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        data = self._post_json_with_retries(self.api_base_url, headers, payload, cancel_check)
+        content = data.get("content")
+        if isinstance(content, list):
+            text_parts = [
+                str(item.get("text", ""))
+                for item in content
+                if isinstance(item, dict) and item.get("type", "text") == "text"
+            ]
+            result = "".join(text_parts).strip()
+            if result:
+                return result
+        raise DeepSeekError(f"{self.provider_display} 响应格式无法解析：{data}")
+
+    def _post_json_with_retries(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object],
+        cancel_check: CancelCheck | None,
+    ) -> dict[str, object]:
         last_error: Exception | None = None
+        response: httpx.Response | None = None
         for attempt in range(1, 4):
             check_cancelled(cancel_check)
             try:
                 timeout = httpx.Timeout(180, connect=30)
                 with httpx.Client(timeout=timeout) as client:
-                    response = client.post(self.config.api_base_url, headers=headers, json=payload)
+                    response = client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
                 break
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
                 if status_code < 500 and status_code not in {408, 409, 425, 429}:
-                    raise DeepSeekError(f"DeepSeek 请求失败：HTTP {status_code}，请检查 API key 或模型权限。") from exc
+                    raise DeepSeekError(
+                        f"{self.provider_display} 请求失败：HTTP {status_code}，请检查 API key 或模型权限。"
+                    ) from exc
                 last_error = exc
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 last_error = exc
@@ -100,16 +214,17 @@ class DeepSeekClient:
                     time.sleep(0.1)
         else:
             raise DeepSeekError(
-                "DeepSeek 请求失败：连接被远端关闭或网络超时。已自动重试 3 次，"
+                f"{self.provider_display} 请求失败：连接被远端关闭或网络超时。已自动重试 3 次，"
                 "请稍后重试，或检查网络/代理/API 服务状态。"
             ) from last_error
 
         check_cancelled(cancel_check)
+        if response is None:
+            raise DeepSeekError(f"{self.provider_display} 请求失败。")
         data = response.json()
-        try:
-            return data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, TypeError) as exc:
-            raise DeepSeekError(f"DeepSeek 响应格式无法解析：{data}") from exc
+        if not isinstance(data, dict):
+            raise DeepSeekError(f"{self.provider_display} 响应格式无法解析：{data}")
+        return data
 
     def detect_field(self, sample_text: str, cancel_check: CancelCheck | None = None) -> FieldContext:
         # Field detection happens once from Abstract/Introduction-like text and

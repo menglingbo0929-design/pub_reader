@@ -22,6 +22,7 @@ from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -48,6 +49,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import QUrl
+
+try:
+    from latex2mathml.converter import convert as latex_to_mathml
+except Exception:  # pragma: no cover - optional preview enhancement.
+    latex_to_mathml = None
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -78,9 +84,16 @@ class NoFocusItemDelegate(QStyledItemDelegate):
 
 
 class ApiKeyDialog(QDialog):
+    PROVIDER_OPTIONS = [
+        ("DeepSeek", "deepseek", "deepseek-v4-pro"),
+        ("ChatGPT / OpenAI", "openai", "gpt-4.1"),
+        ("Claude / Anthropic", "claude", "claude-sonnet-4-5"),
+        ("Qwen / Tongyi", "qwen", "qwen-plus"),
+    ]
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("接入 DeepSeek API Key")
+        self.setWindowTitle("接入模型 API Key")
         self.setModal(True)
         self.setFixedWidth(560)
 
@@ -92,17 +105,25 @@ class ApiKeyDialog(QDialog):
         key_icon = QLabel()
         key_icon.setObjectName("DialogKeyIcon")
         key_icon.setPixmap(self.parent()._make_icon("key", "#2563EB").pixmap(QSize(28, 28)) if isinstance(self.parent(), MainWindow) else QPixmap())
-        title = QLabel("接入 DeepSeek API Key")
+        title = QLabel("接入模型 API Key")
         title.setObjectName("DialogTitle")
         dialog_head.addWidget(key_icon)
         dialog_head.addWidget(title, 1)
-        intro = QLabel("应用将调用 DeepSeek-V4-Pro 模型，为论文生成中文译文 Markdown 和总结 Markdown。")
+        intro = QLabel("应用将调用所选模型接口，为论文生成中文译文 Markdown 和总结 Markdown。")
         intro.setObjectName("HelperText")
         intro.setWordWrap(True)
 
+        provider_label = QLabel("API 厂商")
+        provider_label.setObjectName("FieldLabel")
+        self.provider_select = QComboBox()
+        self.provider_select.setMinimumHeight(40)
+        for label, provider, model in self.PROVIDER_OPTIONS:
+            self.provider_select.addItem(label, {"provider": provider, "model": model})
+        self.provider_select.currentIndexChanged.connect(self._sync_provider_model)
+
         model_label = QLabel("模型")
         model_label.setObjectName("FieldLabel")
-        self.model_input = QLineEdit("DeepSeek-V4-Pro")
+        self.model_input = QLineEdit(self.PROVIDER_OPTIONS[0][2])
         self.model_input.setReadOnly(True)
         self.model_input.setObjectName("ReadOnlyInput")
         self.model_input.setMinimumHeight(40)
@@ -132,6 +153,8 @@ class ApiKeyDialog(QDialog):
         layout.addLayout(dialog_head)
         layout.addWidget(intro)
         layout.addSpacing(4)
+        layout.addWidget(provider_label)
+        layout.addWidget(self.provider_select)
         layout.addWidget(model_label)
         layout.addWidget(self.model_input)
         layout.addWidget(key_label)
@@ -143,6 +166,19 @@ class ApiKeyDialog(QDialog):
     @property
     def api_key(self) -> str:
         return self.input.text().strip()
+
+    @property
+    def provider(self) -> str:
+        data = self.provider_select.currentData() or {}
+        return str(data.get("provider", "deepseek"))
+
+    @property
+    def model_name(self) -> str:
+        return self.model_input.text().strip()
+
+    def _sync_provider_model(self) -> None:
+        data = self.provider_select.currentData() or {}
+        self.model_input.setText(str(data.get("model", "deepseek-v4-pro")))
 
 
 class WorkerSignals(QObject):
@@ -284,12 +320,22 @@ class PdfDropFrame(QFrame):
 
 
 class ProcessPdfTask(QRunnable):
-    def __init__(self, pdf_path: Path, folder: LibraryFolder, api_key: str, action: str) -> None:
+    def __init__(
+        self,
+        pdf_path: Path,
+        folder: LibraryFolder,
+        api_key: str,
+        action: str,
+        provider: str = "deepseek",
+        model_name: str | None = None,
+    ) -> None:
         super().__init__()
         self.pdf_path = pdf_path
         self.folder = folder
         self.api_key = api_key
         self.action = action
+        self.provider = provider
+        self.model_name = model_name
         self.signals = WorkerSignals()
         self._cancel_event = threading.Event()
 
@@ -305,7 +351,12 @@ class ProcessPdfTask(QRunnable):
             # Run all PDF and network work off the UI thread so the window stays
             # responsive while DeepSeek requests are in flight.
             config = load_config()
-            client = DeepSeekClient(self.api_key, config)
+            client = DeepSeekClient(
+                self.api_key,
+                config,
+                provider=self.provider,
+                model_name=self.model_name,
+            )
             runner = generate_translation if self.action == "translation" else generate_summary
             outputs = runner(
                 self.pdf_path,
@@ -2090,26 +2141,72 @@ class MainWindow(QMainWindow):
 
     def _preview_markdown_to_html(self, markdown: str) -> str:
         """Render generated Markdown into HTML while preserving raw table blocks."""
-        inline_math_re = re.compile(r"(\\\(.*?\\\)|\$(?!\$).*?(?<!\\)\$)", re.DOTALL)
+        display_formulas: list[str] = []
+        inline_formulas: list[str] = []
 
         def safe_math(text: str) -> str:
             return re.sub(r"</?(?:script|style)[^>]*>", "", text, flags=re.IGNORECASE).strip()
 
-        def render_inline_formula(text: str) -> str:
+        def strip_math_wrappers(text: str) -> str:
             formula = safe_math(text)
-            return f"<span class=\"formula-inline\">{html.escape(formula)}</span>"
+            if formula.startswith("$$") and formula.endswith("$$"):
+                formula = formula[2:-2]
+            elif formula.startswith(r"\[") and formula.endswith(r"\]"):
+                formula = formula[2:-2]
+            elif formula.startswith(r"\(") and formula.endswith(r"\)"):
+                formula = formula[2:-2]
+            elif formula.startswith("$") and formula.endswith("$"):
+                formula = formula[1:-1]
+            return formula.strip()
 
-        def render_display_formula(text: str) -> str:
-            formula = safe_math(text)
+        def split_equation_tag(formula: str) -> tuple[str, str]:
+            tag_match = re.search(r"\\tag\{([^}]+)\}", formula)
+            if not tag_match:
+                return formula, ""
+            tag = tag_match.group(1).strip()
+            formula = (formula[: tag_match.start()] + formula[tag_match.end() :]).strip()
+            return formula, tag
+
+        def render_formula_mathml(text: str, *, display: bool) -> str:
+            formula, tag = split_equation_tag(strip_math_wrappers(text))
             if not formula:
                 return ""
+            body: str
+            if latex_to_mathml is not None:
+                try:
+                    body = latex_to_mathml(formula, display="block" if display else "inline")
+                except Exception:
+                    body = f"<span class=\"formula-fallback\">{html.escape(formula)}</span>"
+            else:
+                body = f"<span class=\"formula-fallback\">{html.escape(formula)}</span>"
+            if not display:
+                return f"<span class=\"formula-inline\">{body}</span>"
+            tag_html = f"<span class=\"formula-tag\">({html.escape(tag)})</span>" if tag else ""
             return (
                 "<div class=\"formula-block\">"
-                "$$\n"
-                f"{html.escape(formula)}"
-                "\n$$"
+                f"<div class=\"formula-math\">{body}</div>"
+                f"{tag_html}"
                 "</div>"
             )
+
+        def stash_display_formula(match: re.Match[str]) -> str:
+            display_formulas.append(match.group(1))
+            return f"\n\n@@DISPLAY_MATH_{len(display_formulas) - 1}@@\n\n"
+
+        def stash_inline_formula(match: re.Match[str]) -> str:
+            inline_formulas.append(match.group(1))
+            return f"@@INLINE_MATH_{len(inline_formulas) - 1}@@"
+
+        markdown = re.sub(r"\$\$(.+?)\$\$", stash_display_formula, markdown, flags=re.DOTALL)
+        markdown = re.sub(r"\\\[(.+?)\\\]", stash_display_formula, markdown, flags=re.DOTALL)
+        markdown = re.sub(r"\\\((.+?)\\\)", stash_inline_formula, markdown, flags=re.DOTALL)
+        markdown = re.sub(r"(?<!\$)\$(?!\$)(.+?)(?<!\\)\$(?!\$)", stash_inline_formula, markdown, flags=re.DOTALL)
+
+        def render_inline_formula(text: str) -> str:
+            return render_formula_mathml(text, display=False)
+
+        def render_display_formula(text: str) -> str:
+            return render_formula_mathml(text, display=True)
 
         def render_existing_formula_block(raw_html: str) -> str:
             latex_match = re.search(r"data-latex=\"([^\"]+)\"", raw_html, flags=re.IGNORECASE)
@@ -2122,19 +2219,14 @@ class MainWindow(QMainWindow):
             return render_display_formula(html.unescape(text))
 
         def inline(text: str) -> str:
-            pieces = inline_math_re.split(text)
-            rendered: list[str] = []
-            for piece in pieces:
-                if not piece:
-                    continue
-                if inline_math_re.fullmatch(piece):
-                    rendered.append(render_inline_formula(piece))
-                    continue
-                escaped = html.escape(piece)
-                escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
-                escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
-                rendered.append(escaped)
-            return "".join(rendered)
+            escaped = html.escape(text)
+            escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+            escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+            return re.sub(
+                r"@@INLINE_MATH_(\d+)@@",
+                lambda match: render_inline_formula(inline_formulas[int(match.group(1))]),
+                escaped,
+            )
 
         def split_table_row(line: str) -> list[str]:
             row = line.strip()
@@ -2217,6 +2309,12 @@ class MainWindow(QMainWindow):
             stripped = lines[index].strip()
             if not stripped:
                 flush_paragraph()
+                index += 1
+                continue
+            display_token = re.fullmatch(r"@@DISPLAY_MATH_(\d+)@@", stripped)
+            if display_token:
+                flush_paragraph()
+                html_parts.append(render_display_formula(display_formulas[int(display_token.group(1))]))
                 index += 1
                 continue
             if stripped.lower().startswith("<table"):
@@ -2358,20 +2456,31 @@ class MainWindow(QMainWindow):
                 border: 0;
                 border-radius: 0;
                 background: #FFFFFF;
-                text-align: center;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
                 overflow-x: auto;
+            }
+            .formula-math {
+                min-width: 0;
+            }
+            .formula-math math,
+            .formula-inline math {
+                font-family: "Cambria Math", "Times New Roman", serif;
+                font-size: 1.08em;
             }
             .formula-inline {
                 white-space: nowrap;
+                vertical-align: middle;
             }
-            .formula-image {
-                max-width: 100%;
-                background: #FFFFFF;
-            }
-            .formula-line {
+            .formula-fallback {
                 font-family: "Cambria Math", "Times New Roman", serif;
-                font-size: 16px;
-                white-space: nowrap;
+                white-space: pre-wrap;
+            }
+            .formula-tag {
+                flex: 0 0 auto;
+                font-weight: 600;
             }
             code {
                 background: #F8FAFC;
@@ -2435,19 +2544,6 @@ class MainWindow(QMainWindow):
             <html>
               <head>
                 <meta charset="utf-8">
-                <script>
-                  window.MathJax = {
-                    tex: {
-                      inlineMath: [['\\\\(', '\\\\)'], ['$', '$']],
-                      displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
-                      processEscapes: true,
-                      packages: {'[+]': ['ams']}
-                    },
-                    svg: {fontCache: 'none'},
-                    options: {skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']}
-                  };
-                </script>
-                <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
                 <style>
             """
             + preview_css
@@ -3184,12 +3280,19 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         if not dialog.api_key:
-            QMessageBox.warning(self, "API key 为空", "请输入 DeepSeek API key。")
+            QMessageBox.warning(self, "API key 为空", "请输入所选模型厂商的 API key。")
             return
 
         self._enter_processing_state(action)
         # The worker emits progress/status signals back to Qt's main thread.
-        task = ProcessPdfTask(self.current_pdf, self.current_folder, dialog.api_key, action)
+        task = ProcessPdfTask(
+            self.current_pdf,
+            self.current_folder,
+            dialog.api_key,
+            action,
+            dialog.provider,
+            dialog.model_name,
+        )
         self.active_task = task
         task.signals.progress.connect(self.on_progress)
         task.signals.finished.connect(self.on_finished)
