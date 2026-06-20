@@ -70,12 +70,11 @@ def render_table_block_to_markdown(table_block: PaperBlock) -> str:
     if not columns and normalized_rows:
         columns = [f"列 {index + 1}" for index in range(max(len(row) for row in normalized_rows))]
 
-    html_content = _block_text(table_block, "html")
-    if html_content and "<table" in html_content.lower():
-        return f"{heading}\n\n{html_content.strip()}"
-
     raw_content = _block_text(table_block, "content") or _block_text(table_block, "raw_text")
     if not columns or not normalized_rows:
+        html_content = _block_text(table_block, "html")
+        if html_content and "<table" in html_content.lower():
+            return f"{heading}\n\n{html_content.strip()}"
         if raw_content:
             if raw_content.count("\n") > 20:
                 return f"{heading}\n\n> 表格未能从 PDF 中可靠解析，请参考原 PDF 对应表格。"
@@ -430,9 +429,13 @@ def _normalize_inline_math_for_preview(markdown: str) -> str:
     return "\n".join(lines)
 
 
-def prepare_markdown_for_preview(markdown: str) -> str:
+def prepare_markdown_for_preview(markdown: str, paper_blocks: Sequence[PaperBlock] = ()) -> str:
     """Keep preview cleanup conservative so the renderer sees the original TeX."""
-    return _remove_unreliable_formula_placeholders(markdown)
+    text = _remove_unreliable_formula_placeholders(markdown)
+    if paper_blocks:
+        text = _replace_split_table_runs_with_structured_tables(text, paper_blocks)
+        text = _replace_structured_table_markup(text, paper_blocks)
+    return _remove_orphan_table_fragments_after_tables(text)
 
 
 def _replace_equation_image_links(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
@@ -580,6 +583,86 @@ def _replace_structured_table_markup(markdown: str, paper_blocks: Sequence[Paper
         return rendered
 
     return table_markup.sub(repl, markdown, count=len(table_blocks))
+
+
+def _is_table_fragment_tail_line(line: str) -> bool:
+    text = line.strip()
+    if not text:
+        return False
+    if text.startswith(("#", "|", "<", "!", "$$", "```")):
+        return False
+    if re.match(r"^(?:图|表|Figure|Table)\s*\d+", text, flags=re.IGNORECASE):
+        return False
+    if re.search(r"[。！？!?]", text) and _numeric_token_count(text) < 3:
+        return False
+    tokens = [token for token in re.split(r"\s+", text) if token]
+    numeric_count = _numeric_token_count(text)
+    if _looks_like_flat_table_line(text):
+        return True
+    if numeric_count >= 1 and len(text) <= 120 and not re.search(r"[。！？!?]", text):
+        return True
+    if len(tokens) >= 2 and numeric_count >= max(1, len(tokens) // 2):
+        return True
+    if len(tokens) <= 4 and re.search(r"[A-Za-z0-9+\-.%]", text) and not re.search(r"[。！？!?]", text):
+        return True
+    return False
+
+
+def _skip_table_tail_fragments(lines: list[str], index: int) -> tuple[int, bool]:
+    cursor = index
+    skipped = False
+    blank_count = 0
+    while cursor < len(lines):
+        stripped = lines[cursor].strip()
+        if not stripped:
+            if skipped:
+                cursor += 1
+                continue
+            if blank_count >= 1:
+                break
+            blank_count += 1
+            cursor += 1
+            continue
+        if _is_table_fragment_tail_line(stripped):
+            skipped = True
+            blank_count = 0
+            cursor += 1
+            continue
+        break
+    return cursor, skipped
+
+
+def _remove_orphan_table_fragments_after_tables(markdown: str) -> str:
+    lines = markdown.splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped.lower().startswith("<table"):
+            while index < len(lines):
+                output.append(lines[index])
+                if "</table>" in lines[index].lower():
+                    index += 1
+                    break
+                index += 1
+            index, skipped = _skip_table_tail_fragments(lines, index)
+            if skipped and index < len(lines) and (not output or output[-1].strip()):
+                output.append("")
+            continue
+        if stripped.startswith("|") and index + 1 < len(lines) and re.fullmatch(
+            r"\s*\|?[\s:\-|]+\|?\s*",
+            lines[index + 1].strip(),
+        ):
+            while index < len(lines) and lines[index].strip().startswith("|"):
+                output.append(lines[index])
+                index += 1
+            index, skipped = _skip_table_tail_fragments(lines, index)
+            if skipped and index < len(lines) and (not output or output[-1].strip()):
+                output.append("")
+            continue
+        output.append(lines[index])
+        index += 1
+    return "\n".join(output)
 
 
 def _table_caption_matches_line(block: PaperBlock, line: str) -> bool:
@@ -799,6 +882,7 @@ def sanitize_markdown(
         text = _insert_missing_equations_into_summary(text, paper_blocks)
     text = _replace_split_table_runs_with_structured_tables(text, paper_blocks)
     text = _replace_structured_table_markup(text, paper_blocks)
+    text = _remove_orphan_table_fragments_after_tables(text)
     text = _append_missing_structures(text, paper_blocks)
     text = _replace_equation_image_links(text, paper_blocks)
     text = _remove_remaining_equation_images(text)
@@ -809,5 +893,6 @@ def sanitize_markdown(
     if normalize_inline_math:
         text = _normalize_inline_math_for_preview(text)
     text = _replace_split_table_runs_with_structured_tables(text, paper_blocks)
+    text = _remove_orphan_table_fragments_after_tables(text)
     text = _remove_unreliable_formula_placeholders(text)
     return _normalize_spacing(text)

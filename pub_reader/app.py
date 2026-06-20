@@ -119,14 +119,6 @@ class ApiKeyDialog(QDialog):
         self.provider_select.setMinimumHeight(40)
         for label, provider, model in self.PROVIDER_OPTIONS:
             self.provider_select.addItem(label, {"provider": provider, "model": model})
-        self.provider_select.currentIndexChanged.connect(self._sync_provider_model)
-
-        model_label = QLabel("模型")
-        model_label.setObjectName("FieldLabel")
-        self.model_input = QLineEdit(self.PROVIDER_OPTIONS[0][2])
-        self.model_input.setReadOnly(True)
-        self.model_input.setObjectName("ReadOnlyInput")
-        self.model_input.setMinimumHeight(40)
 
         key_label = QLabel("API Key")
         key_label.setObjectName("FieldLabel")
@@ -155,8 +147,6 @@ class ApiKeyDialog(QDialog):
         layout.addSpacing(4)
         layout.addWidget(provider_label)
         layout.addWidget(self.provider_select)
-        layout.addWidget(model_label)
-        layout.addWidget(self.model_input)
         layout.addWidget(key_label)
         layout.addWidget(self.input)
         layout.addWidget(helper)
@@ -174,11 +164,8 @@ class ApiKeyDialog(QDialog):
 
     @property
     def model_name(self) -> str:
-        return self.model_input.text().strip()
-
-    def _sync_provider_model(self) -> None:
         data = self.provider_select.currentData() or {}
-        self.model_input.setText(str(data.get("model", "deepseek-v4-pro")))
+        return str(data.get("model", "deepseek-v4-pro")).strip()
 
 
 class WorkerSignals(QObject):
@@ -2293,7 +2280,11 @@ class MainWindow(QMainWindow):
                 "<tr>" + "".join(f"<td>{inline(cell)}</td>" for cell in row) + "</tr>"
                 for row in body_rows
             )
-            return f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
+            return (
+                "<div class=\"table-scroll\">"
+                f"<table><thead><tr>{head_html}</tr></thead><tbody>{body_html}</tbody></table>"
+                "</div>"
+            )
 
         html_parts: list[str] = []
         paragraph: list[str] = []
@@ -2326,7 +2317,7 @@ class MainWindow(QMainWindow):
                         index += 1
                         break
                     index += 1
-                html_parts.append("\n".join(raw))
+                html_parts.append("<div class=\"table-scroll\">" + "\n".join(raw) + "</div>")
                 continue
             if stripped.lower().startswith("<div class=\"formula-block\""):
                 flush_paragraph()
@@ -2419,6 +2410,17 @@ class MainWindow(QMainWindow):
         flush_paragraph()
         return "\n".join(html_parts)
 
+    def _load_preview_paper_blocks(self, path: Path) -> list[dict[str, object]]:
+        metadata_path = path.parent / "metadata.json"
+        if not metadata_path.exists():
+            return []
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return []
+        blocks = metadata.get("paper_blocks") or metadata.get("blocks") or []
+        return blocks if isinstance(blocks, list) else []
+
     def _preview_markdown_in_browser(self, path: Path, browser: QTextBrowser) -> None:
         if browser is self.detail:
             self.single_preview_stack.setCurrentWidget(self.detail)
@@ -2426,7 +2428,7 @@ class MainWindow(QMainWindow):
             markdown = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
             markdown = path.read_text(encoding="utf-8", errors="replace")
-        markdown = prepare_markdown_for_preview(markdown)
+        markdown = prepare_markdown_for_preview(markdown, self._load_preview_paper_blocks(path))
 
         # Keep relative images such as figures/figure_1.png readable inside the
         # embedded Markdown preview.
@@ -2497,8 +2499,14 @@ class MainWindow(QMainWindow):
             table {
                 border-collapse: collapse;
                 border: 1px solid #CBD5E1;
-                margin: 0.9em 0;
+                max-width: none;
+                width: max-content;
+                min-width: 100%;
+            }
+            .table-scroll {
                 max-width: 100%;
+                overflow-x: auto;
+                margin: 0.9em 0;
             }
             th {
                 background: #F8FAFC;
