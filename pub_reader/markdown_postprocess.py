@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from typing import Any, Mapping, Sequence
 
@@ -831,6 +832,76 @@ def _append_missing_structures(markdown: str, paper_blocks: Sequence[PaperBlock]
     if not additions:
         return markdown
     return markdown.rstrip() + "\n\n" + "\n\n".join(additions) + "\n"
+
+
+def _fallback_block_source_length(block: PaperBlock) -> int:
+    total = 0
+    for key in ("text", "content", "raw_text", "latex", "caption"):
+        value = block.get(key)
+        if isinstance(value, str):
+            total += len(value)
+    for key in ("columns", "rows"):
+        value = block.get(key)
+        if isinstance(value, list):
+            total += len(json.dumps(value, ensure_ascii=False))
+    return total
+
+
+def _render_block_fallback(block: PaperBlock) -> str:
+    block_type = _block_text(block, "type")
+    if block_type == "heading":
+        text = _block_text(block, "text") or _block_text(block, "title")
+        if not text:
+            return ""
+        level_raw = block.get("level", 2)
+        level = level_raw if isinstance(level_raw, int) else 2
+        level = min(max(level, 1), 4)
+        return f"{'#' * level} {text}"
+    if block_type == "section":
+        title = _block_text(block, "title")
+        content = _block_text(block, "content")
+        parts = []
+        if title:
+            parts.append(f"## {title}")
+        if content:
+            parts.append(content)
+        return "\n\n".join(parts)
+    if block_type == "paragraph":
+        return _block_text(block, "text") or _block_text(block, "content")
+    if block_type == "figure":
+        return render_figure_block_to_markdown(block)
+    if block_type == "table":
+        return render_table_block_to_markdown(block)
+    if block_type == "equation":
+        return render_equation_block_to_markdown(block)
+    return _block_text(block, "text") or _block_text(block, "content")
+
+
+def ensure_minimum_block_coverage(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:
+    blocks = [block for block in paper_blocks if isinstance(block, dict)]
+    if not blocks:
+        return markdown
+
+    source_len = sum(_fallback_block_source_length(block) for block in blocks)
+    if source_len < 600:
+        return markdown
+
+    compact_output_len = len(re.sub(r"\s+", "", markdown or ""))
+    if compact_output_len >= source_len * 0.25:
+        return markdown
+
+    fallback_parts = [
+        rendered
+        for rendered in (_render_block_fallback(block).strip() for block in blocks)
+        if rendered
+    ]
+    if not fallback_parts:
+        return markdown
+
+    fallback = "\n\n".join(fallback_parts)
+    if not markdown.strip():
+        return fallback + "\n"
+    return markdown.rstrip() + "\n\n" + fallback + "\n"
 
 
 def _insert_missing_equations_into_summary(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:

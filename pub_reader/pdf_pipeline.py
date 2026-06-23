@@ -11,7 +11,7 @@ import fitz
 
 from pub_reader.cancel import CancelCheck, check_cancelled
 from pub_reader.llm import DeepSeekClient, FieldContext
-from pub_reader.markdown_postprocess import sanitize_markdown
+from pub_reader.markdown_postprocess import ensure_minimum_block_coverage, sanitize_markdown
 
 
 ProgressCallback = Callable[[str, int], None]
@@ -2023,7 +2023,7 @@ def _split_large_prompt_block(block: dict[str, Any], max_chars: int) -> list[dic
     return result or [block]
 
 
-def _split_paper_block_chunks(blocks: list[dict[str, Any]], max_chars: int = 8000) -> list[str]:
+def _split_paper_block_chunks(blocks: list[dict[str, Any]], max_chars: int = 3500) -> list[str]:
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_len = 2
@@ -2167,13 +2167,12 @@ def generate_translation(
                 source_blocks = []
         except json.JSONDecodeError:
             source_blocks = []
-        sanitized_chunks.append(
-            sanitize_markdown(
-                raw_chunk,
-                source_blocks,
-                normalize_inline_math=True,
-            )
+        sanitized = sanitize_markdown(
+            raw_chunk,
+            source_blocks,
+            normalize_inline_math=True,
         )
+        sanitized_chunks.append(ensure_minimum_block_coverage(sanitized, source_blocks))
     translated_md = sanitize_markdown(
         "\n\n".join(sanitized_chunks),
         paper_blocks,

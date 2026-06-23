@@ -390,7 +390,7 @@ class DeepSeekClient:
         if not text_key:
             return None
         text = str(block[text_key])
-        if len(text) < 1800:
+        if len(text) < 700:
             return None
 
         split_at = self._split_text_index(text)
@@ -420,10 +420,10 @@ class DeepSeekClient:
         return min(valid, key=lambda position: abs(position - midpoint)) + 1
 
     def _should_split_retry(self, blocks: list[dict[str, object]], output: str, depth: int) -> bool:
-        if depth >= 3 or not blocks:
+        if depth >= 6 or not blocks:
             return False
         source_len = sum(self._block_source_length(block) for block in blocks)
-        if source_len < 2800:
+        if source_len < 900:
             return False
         refusal_or_truncation = any(
             marker in output
@@ -437,12 +437,25 @@ class DeepSeekClient:
                 "未完",
                 "省略",
                 "continued",
+                "continue",
+                "truncated",
+                "omitted",
+                "remaining",
+                "篇幅",
+                "省略",
+                "未完",
+                "后续",
+                "无法完整",
+                "其余内容",
             )
         )
         if refusal_or_truncation:
             return True
         text_like_blocks = sum(1 for block in blocks if str(block.get("type", "")) in {"paragraph", "heading", "section"})
-        return text_like_blocks >= 4 and len(output.strip()) < source_len * 0.24
+        if not text_like_blocks:
+            return False
+        min_ratio = 0.42 if source_len < 5000 else 0.34
+        return len(output.strip()) < source_len * min_ratio
 
     def _compact_blocks_for_summary(self, paper_blocks: str, max_chars: int = 55000) -> str:
         blocks = self._decode_block_chunk(paper_blocks)
