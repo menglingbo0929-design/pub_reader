@@ -75,11 +75,18 @@ def render_table_block_to_markdown(table_block: PaperBlock) -> str:
     if not columns or not normalized_rows:
         html_content = _block_text(table_block, "html")
         if html_content and "<table" in html_content.lower():
-            return f"{heading}\n\n{html_content.strip()}"
+            html_table = html.unescape(html_content.strip())
+            if len(re.findall(r"<t[dh]\b", html_table, flags=re.IGNORECASE)) >= 2:
+                return f"{heading}\n\n{html_table}"
         if raw_content:
-            if raw_content.count("\n") > 20:
-                return f"{heading}\n\n> 表格未能从 PDF 中可靠解析，请参考原 PDF 对应表格。"
-            return f"{heading}\n\n<table>\n<tr><td>{_escape_html_cell(raw_content)}</td></tr>\n</table>"
+            parsed = _parse_raw_table_rows(raw_content)
+            if parsed:
+                parsed_columns, parsed_rows = parsed
+                fallback_block = dict(table_block)
+                fallback_block["columns"] = parsed_columns
+                fallback_block["rows"] = parsed_rows
+                return render_table_block_to_markdown(fallback_block)
+            return f"{heading}\n\n> 表格未能从 PDF 中可靠解析，请参考原 PDF 对应表格。"
         return f"{heading}\n\n> 表格未能从 PDF 中可靠解析。"
 
     width = max(len(columns), *(len(row) for row in normalized_rows))
@@ -107,6 +114,53 @@ def render_table_block_to_markdown(table_block: PaperBlock) -> str:
         for row in normalized_rows
     ]
     return "\n".join([heading, "", header, separator, *body])
+
+
+def _parse_raw_table_rows(raw_content: str) -> tuple[list[str], list[list[str]]] | None:
+    """Recover simple raw table text instead of rendering it as one unreadable cell."""
+    cleaned_lines: list[str] = []
+    for raw_line in html.unescape(raw_content).splitlines():
+        line = re.sub(r"<br\s*/?>", " ", raw_line, flags=re.IGNORECASE)
+        line = re.sub(r"<[^>]+>", " ", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            cleaned_lines.append(line)
+
+    if len(cleaned_lines) < 2:
+        return None
+
+    split_rows: list[list[str]] = []
+    for line in cleaned_lines:
+        if "\t" in line:
+            cells = [cell.strip() for cell in line.split("\t") if cell.strip()]
+        elif "|" in line:
+            cells = [cell.strip() for cell in line.strip("|").split("|") if cell.strip()]
+        else:
+            cells = [cell.strip() for cell in re.split(r"\s{2,}", line) if cell.strip()]
+        if len(cells) >= 2:
+            split_rows.append(cells)
+
+    if len(split_rows) < 2:
+        return None
+
+    width_counts: dict[int, int] = {}
+    for row in split_rows:
+        width_counts[len(row)] = width_counts.get(len(row), 0) + 1
+    width = max(width_counts, key=width_counts.get)
+    if width < 2 or width_counts[width] < 2:
+        return None
+
+    normalized: list[list[str]] = []
+    for row in split_rows:
+        if len(row) == width:
+            normalized.append(row)
+        elif len(row) > width:
+            normalized.append(row[: width - 1] + [" ".join(row[width - 1 :])])
+
+    if len(normalized) < 2:
+        return None
+
+    return normalized[0], normalized[1:]
 
 
 def render_figure_block_to_markdown(figure_block: PaperBlock) -> str:
@@ -401,8 +455,26 @@ def _normalize_inline_math_for_preview(markdown: str) -> str:
     # so Markdown renderers and the embedded preview can process them as math.
     lines: list[str] = []
     in_display_math = False
+    in_html_table = False
     for line in markdown.splitlines():
-        if line.strip() == "$$":
+        stripped = line.strip()
+        lower = stripped.lower()
+        if "<table" in lower:
+            in_html_table = True
+            lines.append(line)
+            continue
+        if in_html_table:
+            lines.append(line)
+            if "</table>" in lower:
+                in_html_table = False
+            continue
+        if stripped.startswith("|") and "|" in stripped[1:]:
+            lines.append(line)
+            continue
+        if any(tag in lower for tag in ("<tr", "<td", "<th", "</tr", "</td", "</th")):
+            lines.append(line)
+            continue
+        if stripped == "$$":
             in_display_math = not in_display_math
             lines.append(line)
             continue
@@ -433,10 +505,40 @@ def _normalize_inline_math_for_preview(markdown: str) -> str:
 def prepare_markdown_for_preview(markdown: str, paper_blocks: Sequence[PaperBlock] = ()) -> str:
     """Keep preview cleanup conservative so the renderer sees the original TeX."""
     text = _remove_unreliable_formula_placeholders(markdown)
+    text = _repair_preview_image_syntax(text)
     if paper_blocks:
         text = _replace_split_table_runs_with_structured_tables(text, paper_blocks)
         text = _replace_structured_table_markup(text, paper_blocks)
-    return _remove_orphan_table_fragments_after_tables(text)
+    text = _remove_orphan_table_fragments_after_tables(text)
+    text = _repair_preview_table_html(text)
+    return _normalize_inline_math_for_preview(text)
+
+
+def _repair_preview_image_syntax(markdown: str) -> str:
+    text = re.sub(r"(?m)^'!\[", "![", markdown)
+    text = re.sub(r"(?m)^!\s+\[", "![", text)
+    text = re.sub(r"\]\s+\(", "](", text)
+    return text
+
+
+def _repair_preview_table_html(markdown: str) -> str:
+    replacements = {
+        "&lt;table": "<table",
+        "&lt;/table&gt;": "</table>",
+        "&lt;tr": "<tr",
+        "&lt;/tr&gt;": "</tr>",
+        "&lt;td": "<td",
+        "&lt;/td&gt;": "</td>",
+        "&lt;th": "<th",
+        "&lt;/th&gt;": "</th>",
+        "&lt;br&gt;": "<br>",
+        "&lt;br/&gt;": "<br/>",
+        "&lt;br /&gt;": "<br />",
+    }
+    text = markdown
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
 
 
 def _replace_equation_image_links(markdown: str, paper_blocks: Sequence[PaperBlock]) -> str:

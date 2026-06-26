@@ -2154,10 +2154,62 @@ class MainWindow(QMainWindow):
             formula = (formula[: tag_match.start()] + formula[tag_match.end() :]).strip()
             return formula, tag
 
+        formula_image_cache: dict[tuple[str, bool], str] = {}
+
+        def render_formula_image(formula: str, *, display: bool) -> str | None:
+            cache_key = (formula, display)
+            if cache_key in formula_image_cache:
+                return formula_image_cache[cache_key]
+            try:
+                import base64
+                import io
+
+                from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+                from matplotlib.figure import Figure
+
+                clean = formula.strip()
+                if not clean:
+                    return None
+                fig = Figure(figsize=(0.01, 0.01), dpi=180)
+                fig.patch.set_alpha(0.0)
+                canvas = FigureCanvas(fig)
+                text_artist = fig.text(
+                    0.0,
+                    0.0,
+                    f"${clean}$",
+                    fontsize=18 if display else 13,
+                    color="#111827",
+                )
+                canvas.draw()
+                bbox = text_artist.get_window_extent(renderer=canvas.get_renderer()).expanded(1.08, 1.35)
+                fig.set_size_inches(max(0.16, bbox.width / fig.dpi), max(0.10, bbox.height / fig.dpi))
+                text_artist.set_position((0.02, 0.28))
+                canvas.draw()
+                buffer = io.BytesIO()
+                fig.savefig(buffer, format="png", dpi=180, transparent=True, bbox_inches="tight", pad_inches=0.025)
+                data = base64.b64encode(buffer.getvalue()).decode("ascii")
+                css_class = "formula-block-image" if display else "formula-inline-image"
+                rendered = f'<img class="{css_class}" alt="{html.escape(clean)}" src="data:image/png;base64,{data}">'
+                formula_image_cache[cache_key] = rendered
+                return rendered
+            except Exception:
+                return None
+
         def render_formula_mathml(text: str, *, display: bool) -> str:
             formula, tag = split_equation_tag(strip_math_wrappers(text))
             if not formula:
                 return ""
+            image_body = render_formula_image(formula, display=display)
+            if image_body:
+                if not display:
+                    return image_body
+                tag_html = f"<span class=\"formula-tag\">({html.escape(tag)})</span>" if tag else ""
+                return (
+                    "<div class=\"formula-block\">"
+                    f"<div class=\"formula-math\">{image_body}</div>"
+                    f"{tag_html}"
+                    "</div>"
+                )
             body: str
             if latex_to_mathml is not None:
                 try:
@@ -2475,6 +2527,18 @@ class MainWindow(QMainWindow):
             .formula-inline {
                 white-space: nowrap;
                 vertical-align: middle;
+            }
+            .formula-inline-image {
+                display: inline-block;
+                max-height: 1.45em;
+                max-width: 100%;
+                vertical-align: -0.25em;
+                margin: 0 0.08em;
+            }
+            .formula-block-image {
+                display: inline-block;
+                max-width: 100%;
+                height: auto;
             }
             .formula-fallback {
                 font-family: "Cambria Math", "Times New Roman", serif;
